@@ -7,6 +7,7 @@ import {
   type HierarchyLevel,
   type HierarchyNode,
 } from '../lib/series';
+import { userInitials } from '../lib/user';
 
 type PresenceUser = { id: string; name: string; color: string };
 
@@ -640,7 +641,7 @@ export function FindingAidHierarchy({
                               style={{ backgroundColor: person.color }}
                               title={`${person.name} focused`}
                             >
-                              {person.name.slice(0, 1).toUpperCase()}
+                              {userInitials(person.name)}
                             </span>
                           ))}
                         </span>

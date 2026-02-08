@@ -24,6 +24,7 @@ type FindingAidEditorProps = {
   hierarchyHeadings: HierarchyHeading[];
   focusedHierarchyId?: string;
   focusRequestKey?: number;
+  onCursorHierarchyFocus?: (hierarchyId: string) => void;
   onChange: (nextContent: PMNode[]) => void;
 };
 
@@ -302,6 +303,37 @@ function removeHeadingAtSelection(editor: ReturnType<typeof useEditor>): boolean
   return true;
 }
 
+function readHierarchyIdAtSelection(editor: ReturnType<typeof useEditor>): string | null {
+  if (!editor) {
+    return null;
+  }
+
+  const { doc, selection } = editor.state;
+  const anchorPos = selection.$from.pos;
+  let lastSeenHierarchyId: string | null = null;
+
+  doc.nodesBetween(0, anchorPos, (node) => {
+    if (node.type.name === 'heading' && node.attrs?.hierarchyId != null) {
+      lastSeenHierarchyId = String(node.attrs.hierarchyId);
+    }
+  });
+
+  if (lastSeenHierarchyId) {
+    return lastSeenHierarchyId;
+  }
+
+  let firstHierarchyId: string | null = null;
+  doc.descendants((node) => {
+    if (node.type.name === 'heading' && node.attrs?.hierarchyId != null) {
+      firstHierarchyId = String(node.attrs.hierarchyId);
+      return false;
+    }
+    return true;
+  });
+
+  return firstHierarchyId;
+}
+
 function EditorActionButton({
   children,
   active,
@@ -333,10 +365,13 @@ export function FindingAidEditor({
   hierarchyHeadings,
   focusedHierarchyId,
   focusRequestKey = 0,
+  onCursorHierarchyFocus,
   onChange,
 }: FindingAidEditorProps) {
   const isApplyingRef = useRef(false);
   const hierarchyHeadingsRef = useRef(hierarchyHeadings);
+  const onCursorHierarchyFocusRef = useRef(onCursorHierarchyFocus);
+  const lastReportedHierarchyIdRef = useRef<string | null>(null);
   const onChangeRef = useRef(onChange);
   const contentSignature = useMemo(() => JSON.stringify(content), [content]);
   const hierarchySignature = useMemo(() => JSON.stringify(hierarchyHeadings), [hierarchyHeadings]);
@@ -346,8 +381,9 @@ export function FindingAidEditor({
 
   useEffect(() => {
     hierarchyHeadingsRef.current = hierarchyHeadings;
+    onCursorHierarchyFocusRef.current = onCursorHierarchyFocus;
     onChangeRef.current = onChange;
-  }, [hierarchyHeadings, onChange]);
+  }, [hierarchyHeadings, onCursorHierarchyFocus, onChange]);
 
   const editor = useEditor({
     extensions: [
@@ -382,6 +418,19 @@ export function FindingAidEditor({
 
       syncedContentSignatureRef.current = nextSignature;
       onChangeRef.current(normalized);
+    },
+    onSelectionUpdate: ({ editor: current }) => {
+      if (!current.isFocused) {
+        return;
+      }
+
+      const hierarchyId = readHierarchyIdAtSelection(current);
+      if (!hierarchyId || lastReportedHierarchyIdRef.current === hierarchyId) {
+        return;
+      }
+
+      lastReportedHierarchyIdRef.current = hierarchyId;
+      onCursorHierarchyFocusRef.current?.(hierarchyId);
     },
   }, []);
 
@@ -423,6 +472,7 @@ export function FindingAidEditor({
       return;
     }
 
+    lastReportedHierarchyIdRef.current = focusedHierarchyId;
     editor.chain().focus(headingPos + 1).scrollIntoView().run();
   }, [editor, focusedHierarchyId, focusRequestKey]);
 
@@ -475,7 +525,7 @@ export function FindingAidEditor({
         <div className="finding-aid__toolbar-left">
           <span>Finding Aid</span>
           <span className="finding-aid__toolbar-hint">
-            Guided hierarchy sections above editable narrative text.
+            A descriptive guide that helps locate and understand archival materials
           </span>
         </div>
 

@@ -8,6 +8,7 @@ import {
   type HierarchyLevel,
   type HierarchyNode,
 } from '../lib/series';
+import { userInitials } from '../lib/user';
 
 type HierarchyRailProps = {
   root: HierarchyNode;
@@ -154,7 +155,7 @@ function HierarchyRow({
                   style={{ backgroundColor: user.color }}
                   title={`${user.name} focused`}
                 >
-                  {user.name.slice(0, 1).toUpperCase()}
+                  {userInitials(user.name)}
                 </span>
               ))}
             </span>

@@ -62,6 +62,7 @@ import {
   type HierarchyNode,
   type ItemFieldModel,
 } from './lib/series';
+import { userInitials } from './lib/user';
 
 type ManifestSeriesRef = {
   seriesId: string;
@@ -141,8 +142,9 @@ const CMS_FIELDS: CmsFieldSpec[] = [
   },
 ];
 
-const LOCAL_USER = { id: 'user-local', name: 'You', color: '#ff5757' };
-const PEER_USER = { id: 'user-peer', name: 'Peer', color: '#3b82f6' };
+const LOCAL_USER = { id: 'user-local', name: 'Archivist Reviewer', color: '#ff5757' };
+const PEER_USER = { id: 'user-peer', name: 'Peer Reviewer', color: '#3b82f6' };
+const LOCAL_USER_INITIALS = userInitials(LOCAL_USER.name);
 const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
 
 export function App() {
@@ -570,6 +572,21 @@ export function App() {
       setFocusRequestKey((value) => value + 1);
     },
     [updateCurrentFocusState],
+  );
+
+  const focusHierarchyNodeFromDocument = useCallback(
+    (id: string) => {
+      if (!activeHierarchy || !nodeExists(activeHierarchy, id) || currentFocusState?.focusedId === id) {
+        return;
+      }
+
+      updateCurrentFocusState((state) => ({
+        ...state,
+        focusedId: id,
+        expandedIds: new Set(state.expandedIds),
+      }));
+    },
+    [activeHierarchy, currentFocusState?.focusedId, updateCurrentFocusState],
   );
 
   const applyHierarchyMetadataPatch = useCallback(
@@ -1071,7 +1088,7 @@ export function App() {
         <div className="header-actions">
           <p className="header-actions__institution">{activeInstitutionName}</p>
           <button type="button" className="header-user" title="Logged in user (placeholder)">
-            <span className="header-user__avatar">AR</span>
+            <span className="header-user__avatar">{LOCAL_USER_INITIALS}</span>
           </button>
 
           {debugMode ? (
@@ -1357,7 +1374,7 @@ export function App() {
                   }))
                 }
               >
-                CMS / Focus View
+                Catalog View
               </button>
 
               <button
@@ -1388,6 +1405,7 @@ export function App() {
                 hierarchyHeadings={hierarchyHeadings}
                 focusedHierarchyId={currentFocusState.focusedId ?? undefined}
                 focusRequestKey={focusRequestKey}
+                onCursorHierarchyFocus={focusHierarchyNodeFromDocument}
                 onChange={(nextContent) => updateActiveSeriesDoc((doc) => setSeriesBodyNodes(doc, nextContent))}
               />
 
@@ -1421,7 +1439,7 @@ export function App() {
               </div>
             </section>
           ) : currentFocusState.mode === 'focus' ? (
-            <section className="panel focus-panel cms-panel" aria-label="CMS view">
+            <section className="panel focus-panel cms-panel" aria-label="Catalog view">
               <p className="cms-panel__hint">Plain forms generated from the focused hierarchy node.</p>
 
               {focusedNode ? (
@@ -1553,7 +1571,7 @@ export function App() {
           ) : (
             <section className="panel json-panel" aria-label="JSON view">
               <p className="json-panel__hint">
-                Source-of-truth data and transformed editor data used by the hierarchy, document, and CMS screens.
+                Source-of-truth data and transformed editor data used by the hierarchy, document, and Catalog screens.
               </p>
 
               <div className="json-panel__explain">
@@ -1566,13 +1584,13 @@ export function App() {
                     Each series has its own canonical TipTap-compatible JSON document; hierarchy nodes and body sections live there.
                   </li>
                   <li>
-                    The hierarchy widget edits node structure and metadata; those updates synchronize into both Document and CMS views.
+                    The hierarchy widget edits node structure and metadata; those updates synchronize into both Finding Aid and Catalog views.
                   </li>
                   <li>
                     Finding Aid view renders a Word-style composite doc by combining canonical `seriesBody` with synthetic hierarchy headings.
                   </li>
                   <li>
-                    CMS view is generated from the currently focused hierarchy node and writes metadata straight back to canonical JSON.
+                    Catalog view is generated from the currently focused hierarchy node and writes metadata straight back to canonical JSON.
                   </li>
                 </ol>
               </div>
