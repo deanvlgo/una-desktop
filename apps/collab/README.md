@@ -1,0 +1,38 @@
+# Hocuspocus Collaboration Server
+
+Local Y.js WebSocket server for the archival editor.
+
+## Run
+
+```bash
+npm run -w @archival/collab dev
+```
+
+Default endpoint:
+
+- `ws://127.0.0.1:1234`
+
+## Environment
+
+- `HOCUSPOCUS_PORT` (default: `1234`)
+- `HOCUSPOCUS_HOST` (default: `127.0.0.1`)
+- `HOCUSPOCUS_DATA_DIR` (default: `apps/collab/.hocuspocus-data`)
+
+## Web App Integration
+
+The web app uses `VITE_HOCUSPOCUS_URL` and defaults to `ws://127.0.0.1:1234`.
+
+To run the web app against this server:
+
+```bash
+VITE_HOCUSPOCUS_URL=ws://127.0.0.1:1234 npm run -w @archival/web dev
+```
+
+## Multi-User Smoke Test
+
+Open two browser windows with different user names:
+
+- `http://localhost:5173/?user=Alex`
+- `http://localhost:5173/?user=Blair`
+
+Optional: disable live collab in a window with `?collab=0`.

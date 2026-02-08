@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent } from 'react';
 
 import {
-  AwarenessStore,
   InMemoryAgentActionLog,
   acceptMoveSubtreeCrossSeries,
   acceptSuggestionBlock,
@@ -21,6 +20,7 @@ import {
   rejectSuggestionDelete,
   rejectSuggestionGroup,
   rejectSuggestionInsert,
+  manifestDocName,
   seriesDocName,
 } from '../../../packages/core/src';
 import type {
@@ -63,6 +63,7 @@ import {
   type ItemFieldModel,
 } from './lib/series';
 import { userInitials } from './lib/user';
+import { CollabClient, buildCollabSeeds } from './lib/collab';
 
 type ManifestSeriesRef = {
   seriesId: string;
@@ -90,6 +91,13 @@ type CmsFieldSpec = {
 };
 
 type PresenceMap = Record<string, Array<{ id: string; name: string; color: string }>>;
+type CatalogCursorPresence = {
+  id: string;
+  name: string;
+  color: string;
+  position: number | null;
+};
+type CatalogCursorByField = Record<string, CatalogCursorPresence[]>;
 
 const PRIMARY_COLLECTION_ID = 'col-001';
 const SECONDARY_COLLECTION_ID = 'col-002';
@@ -142,8 +150,45 @@ const CMS_FIELDS: CmsFieldSpec[] = [
   },
 ];
 
-const LOCAL_USER = { id: 'user-local', name: 'Archivist Reviewer', color: '#ff5757' };
-const PEER_USER = { id: 'user-peer', name: 'Peer Reviewer', color: '#3b82f6' };
+const COLLAB_WS_URL = (import.meta.env.VITE_HOCUSPOCUS_URL as string | undefined) ?? 'ws://127.0.0.1:1234';
+const USER_COLOR_PALETTE = ['#ff5757', '#3b82f6', '#059669', '#a855f7', '#d97706', '#0f766e'];
+
+function pickUserColor(seed: string): string {
+  if (seed.length === 0) {
+    return USER_COLOR_PALETTE[0];
+  }
+
+  let hash = 0;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  }
+
+  return USER_COLOR_PALETTE[hash % USER_COLOR_PALETTE.length] ?? USER_COLOR_PALETTE[0];
+}
+
+function createLocalUser(): { id: string; name: string; color: string } {
+  if (typeof window === 'undefined') {
+    return { id: 'user-local', name: 'Archivist Reviewer', color: USER_COLOR_PALETTE[0] };
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const queryName = params.get('user')?.trim();
+  const storedId = window.sessionStorage.getItem('archival-editor:user-id');
+  const storedName = window.sessionStorage.getItem('archival-editor:user-name');
+  const id = storedId && storedId.length > 0 ? storedId : crypto.randomUUID();
+  const name = queryName && queryName.length > 0 ? queryName : storedName && storedName.length > 0 ? storedName : 'Archivist Reviewer';
+
+  window.sessionStorage.setItem('archival-editor:user-id', id);
+  window.sessionStorage.setItem('archival-editor:user-name', name);
+
+  return {
+    id,
+    name,
+    color: pickUserColor(id),
+  };
+}
+
+const LOCAL_USER = createLocalUser();
 const LOCAL_USER_INITIALS = userInitials(LOCAL_USER.name);
 const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
 
@@ -167,14 +212,36 @@ export function App() {
   const [logVersion, setLogVersion] = useState(0);
   const [presenceByNodeId, setPresenceByNodeId] = useState<PresenceMap>({});
   const [collectionPresence, setCollectionPresence] = useState<Record<string, number>>({});
+  const [catalogCursorByField, setCatalogCursorByField] = useState<CatalogCursorByField>({});
 
   const [actionLogStore] = useState(() => new InMemoryAgentActionLog());
-  const [awarenessStore] = useState(() => new AwarenessStore());
+  const collabClientRef = useRef<CollabClient | null>(null);
+  const applyingRemoteWorkspaceRef = useRef(false);
+  const lastFocusedSeriesDocRef = useRef<string | null>(null);
+  const collabEnabled = useMemo(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return new URLSearchParams(window.location.search).get('collab') !== '0';
+  }, []);
 
   const activeManifestDoc = useMemo(
     () => workspace.manifestsByCollectionId[workspace.activeCollectionId] ?? null,
     [workspace.activeCollectionId, workspace.manifestsByCollectionId],
   );
+  const workspaceRef = useRef(workspace);
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
+
+  const manifestDocNameByCollectionId = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const collectionId of workspace.collectionOrder) {
+      map[collectionId] = manifestDocName(collectionId);
+    }
+    return map;
+  }, [workspace.collectionOrder]);
 
   const seriesRefs = useMemo(() => {
     if (!activeManifestDoc) {
@@ -261,6 +328,9 @@ export function App() {
   }, [seriesRefs, workspace.activeSeriesDocName]);
 
   const activeSeriesDoc = workspace.seriesDocs[workspace.activeSeriesDocName] ?? null;
+  const activeSeriesProvider = collabEnabled
+    ? collabClientRef.current?.getProvider(workspace.activeSeriesDocName) ?? null
+    : null;
 
   const activeHierarchy = useMemo<HierarchyNode | null>(() => {
     if (!activeSeriesDoc) {
@@ -326,27 +396,256 @@ export function App() {
     }));
   }, [activeHierarchy, currentFocusState, updateCurrentFocusState]);
 
-  useEffect(() => {
-    if (!activeHierarchy || !currentFocusState) {
+  const applyWorkspaceFromCollab = useCallback((changedDocName?: string) => {
+    const collab = collabClientRef.current;
+    if (!collab) {
       return;
     }
 
-    const peerFocus = activeHierarchy.children[0]?.id ?? activeHierarchy.id;
-    awarenessStore.set(workspace.activeSeriesDocName, {
+    applyingRemoteWorkspaceRef.current = true;
+
+    setWorkspace((previous) => {
+      let nextManifests = previous.manifestsByCollectionId;
+      let nextSeriesDocs = previous.seriesDocs;
+      let changed = false;
+
+      const targetCollectionIds =
+        changedDocName && changedDocName.startsWith('collection:')
+          ? previous.collectionOrder.filter((collectionId) => manifestDocName(collectionId) === changedDocName)
+          : previous.collectionOrder;
+
+      for (const collectionId of targetCollectionIds) {
+        const docName = manifestDocName(collectionId);
+        const remoteManifest = collab.getDoc<CollectionManifestDoc>(docName);
+        if (!remoteManifest) {
+          continue;
+        }
+
+        const currentManifest = previous.manifestsByCollectionId[collectionId];
+        if (!currentManifest || JSON.stringify(currentManifest) !== JSON.stringify(remoteManifest)) {
+          if (nextManifests === previous.manifestsByCollectionId) {
+            nextManifests = { ...previous.manifestsByCollectionId };
+          }
+          nextManifests[collectionId] = remoteManifest;
+          changed = true;
+        }
+      }
+
+      if (changedDocName && changedDocName.startsWith('series:')) {
+        const currentSeriesDoc = previous.seriesDocs[changedDocName];
+        const remoteSeriesDoc = collab.getDoc<SeriesDoc>(changedDocName);
+        if (currentSeriesDoc && remoteSeriesDoc && JSON.stringify(currentSeriesDoc) !== JSON.stringify(remoteSeriesDoc)) {
+          if (nextSeriesDocs === previous.seriesDocs) {
+            nextSeriesDocs = { ...previous.seriesDocs };
+          }
+          nextSeriesDocs[changedDocName] = remoteSeriesDoc;
+          changed = true;
+        }
+      } else {
+        for (const [docName, currentSeriesDoc] of Object.entries(previous.seriesDocs)) {
+          const remoteSeriesDoc = collab.getDoc<SeriesDoc>(docName);
+          if (!remoteSeriesDoc) {
+            continue;
+          }
+
+          if (JSON.stringify(currentSeriesDoc) !== JSON.stringify(remoteSeriesDoc)) {
+            if (nextSeriesDocs === previous.seriesDocs) {
+              nextSeriesDocs = { ...previous.seriesDocs };
+            }
+            nextSeriesDocs[docName] = remoteSeriesDoc;
+            changed = true;
+          }
+        }
+      }
+
+      if (!changed) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        manifestsByCollectionId: nextManifests,
+        seriesDocs: nextSeriesDocs,
+      };
+    });
+
+    queueMicrotask(() => {
+      applyingRemoteWorkspaceRef.current = false;
+    });
+  }, []);
+
+  const refreshPresenceFromCollab = useCallback(() => {
+    const collab = collabClientRef.current;
+    if (!collab) {
+      return;
+    }
+
+    const presenceByDoc = collab.getPresenceByDoc();
+    const activeDocName = workspaceRef.current.activeSeriesDocName;
+    const activeDocPresence = presenceByDoc[activeDocName] ?? [];
+    const nextPresenceByNodeId: PresenceMap = {};
+    const nextCollectionPresence: Record<string, number> = {};
+    const nextCatalogCursorByField: CatalogCursorByField = {};
+
+    for (const [docName, users] of Object.entries(presenceByDoc)) {
+      if (docName.startsWith('series:')) {
+        nextCollectionPresence[docName] = users.filter((entry) => entry.focusId != null).length;
+      }
+    }
+
+    for (const state of activeDocPresence) {
+      if (!state.focusId) {
+        continue;
+      }
+      const chips = nextPresenceByNodeId[state.focusId] ?? [];
+      chips.push(state.user);
+      nextPresenceByNodeId[state.focusId] = chips;
+    }
+
+    for (const state of activeDocPresence) {
+      if (state.user.id === LOCAL_USER.id || !state.catalogCursor?.fieldId) {
+        continue;
+      }
+
+      const chips = nextCatalogCursorByField[state.catalogCursor.fieldId] ?? [];
+      chips.push({
+        id: state.user.id,
+        name: state.user.name,
+        color: state.user.color,
+        position: state.catalogCursor.position,
+      });
+      nextCatalogCursorByField[state.catalogCursor.fieldId] = chips;
+    }
+
+    setPresenceByNodeId(nextPresenceByNodeId);
+    setCollectionPresence(nextCollectionPresence);
+    setCatalogCursorByField(nextCatalogCursorByField);
+  }, []);
+
+  useEffect(() => {
+    if (!collabEnabled) {
+      return;
+    }
+
+    const collab = new CollabClient({
+      url: COLLAB_WS_URL,
       user: LOCAL_USER,
-      focusId: currentFocusState.focusedId,
-      updatedAt: Date.now(),
+      onDocChanged: applyWorkspaceFromCollab,
+      onPresenceChanged: refreshPresenceFromCollab,
+    });
+    collabClientRef.current = collab;
+
+    const snapshot = workspaceRef.current;
+    const seedMap: Record<string, string> = {};
+    for (const collectionId of snapshot.collectionOrder) {
+      seedMap[collectionId] = manifestDocName(collectionId);
+    }
+
+    const seeds = buildCollabSeeds({
+      manifestsByCollectionId: snapshot.manifestsByCollectionId,
+      seriesDocs: snapshot.seriesDocs,
+      manifestDocNameByCollectionId: seedMap,
     });
 
-    awarenessStore.set(workspace.activeSeriesDocName, {
-      user: PEER_USER,
-      focusId: peerFocus,
-      updatedAt: Date.now(),
+    for (const seed of seeds) {
+      collab.connectRoom(seed);
+    }
+
+    applyWorkspaceFromCollab();
+    refreshPresenceFromCollab();
+
+    return () => {
+      collab.disconnectAll();
+      collabClientRef.current = null;
+    };
+  }, [applyWorkspaceFromCollab, collabEnabled, refreshPresenceFromCollab]);
+
+  useEffect(() => {
+    if (!collabEnabled) {
+      return;
+    }
+
+    const collab = collabClientRef.current;
+    if (!collab) {
+      return;
+    }
+
+    const seeds = buildCollabSeeds({
+      manifestsByCollectionId: workspace.manifestsByCollectionId,
+      seriesDocs: workspace.seriesDocs,
+      manifestDocNameByCollectionId,
     });
 
-    setPresenceByNodeId(awarenessStore.focusChips(workspace.activeSeriesDocName));
-    setCollectionPresence(awarenessStore.listCollectionPresence('series:'));
-  }, [awarenessStore, workspace.activeSeriesDocName, activeHierarchy, currentFocusState]);
+    for (const seed of seeds) {
+      collab.connectRoom(seed);
+    }
+  }, [collabEnabled, manifestDocNameByCollectionId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
+
+  useEffect(() => {
+    if (!collabEnabled || applyingRemoteWorkspaceRef.current) {
+      return;
+    }
+
+    const collab = collabClientRef.current;
+    if (!collab) {
+      return;
+    }
+
+    for (const [collectionId, manifest] of Object.entries(workspace.manifestsByCollectionId)) {
+      const roomName = manifestDocNameByCollectionId[collectionId];
+      if (!roomName) {
+        continue;
+      }
+      collab.publishDoc(roomName, manifest);
+    }
+
+    for (const [docName, seriesDoc] of Object.entries(workspace.seriesDocs)) {
+      collab.publishDoc(docName, seriesDoc);
+    }
+  }, [collabEnabled, manifestDocNameByCollectionId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
+
+  useEffect(() => {
+    if (!currentFocusState) {
+      return;
+    }
+
+    const collab = collabClientRef.current;
+    if (collabEnabled && collab) {
+      const previousDocName = lastFocusedSeriesDocRef.current;
+      if (previousDocName && previousDocName !== workspace.activeSeriesDocName) {
+        collab.setFocus(previousDocName, null);
+        collab.setCatalogCursor(previousDocName, null);
+      }
+      collab.setFocus(workspace.activeSeriesDocName, currentFocusState.focusedId);
+      lastFocusedSeriesDocRef.current = workspace.activeSeriesDocName;
+      refreshPresenceFromCollab();
+      return;
+    }
+
+    const focusedId = currentFocusState.focusedId;
+    if (!focusedId) {
+      setPresenceByNodeId({});
+      return;
+    }
+
+    setPresenceByNodeId({
+      [focusedId]: [LOCAL_USER],
+    });
+  }, [collabEnabled, currentFocusState, refreshPresenceFromCollab, workspace.activeSeriesDocName]);
+
+  useEffect(() => {
+    if (collabEnabled && collabClientRef.current) {
+      refreshPresenceFromCollab();
+      return;
+    }
+
+    const counts: Record<string, number> = {};
+    for (const docName of Object.keys(workspace.seriesDocs)) {
+      counts[docName] = docName === workspace.activeSeriesDocName ? 1 : 0;
+    }
+    setCollectionPresence(counts);
+    setCatalogCursorByField({});
+  }, [collabEnabled, refreshPresenceFromCollab, workspace.activeSeriesDocName, workspace.seriesDocs]);
 
   useEffect(() => {
     const handleToggleDebug = (event: KeyboardEvent) => {
@@ -588,6 +887,40 @@ export function App() {
     },
     [activeHierarchy, currentFocusState?.focusedId, updateCurrentFocusState],
   );
+
+  const publishCatalogCursor = useCallback(
+    (fieldId: string, position: number | null) => {
+      const collab = collabClientRef.current;
+      if (!collabEnabled || !collab) {
+        return;
+      }
+
+      collab.setCatalogCursor(workspace.activeSeriesDocName, {
+        fieldId,
+        position,
+      });
+      refreshPresenceFromCollab();
+    },
+    [collabEnabled, refreshPresenceFromCollab, workspace.activeSeriesDocName],
+  );
+
+  const clearCatalogCursor = useCallback(() => {
+    const collab = collabClientRef.current;
+    if (!collabEnabled || !collab) {
+      return;
+    }
+
+    collab.setCatalogCursor(workspace.activeSeriesDocName, null);
+    refreshPresenceFromCollab();
+  }, [collabEnabled, refreshPresenceFromCollab, workspace.activeSeriesDocName]);
+
+  useEffect(() => {
+    if (!collabEnabled || !currentFocusState || currentFocusState.mode === 'focus') {
+      return;
+    }
+
+    clearCatalogCursor();
+  }, [clearCatalogCursor, collabEnabled, currentFocusState]);
 
   const applyHierarchyMetadataPatch = useCallback(
     (nodeId: string, patch: Record<string, string | undefined>) => {
@@ -1405,6 +1738,17 @@ export function App() {
                 hierarchyHeadings={hierarchyHeadings}
                 focusedHierarchyId={currentFocusState.focusedId ?? undefined}
                 focusRequestKey={focusRequestKey}
+                collaboration={
+                  activeSeriesProvider
+                    ? {
+                        provider: activeSeriesProvider,
+                        user: {
+                          name: LOCAL_USER.name,
+                          color: LOCAL_USER.color,
+                        },
+                      }
+                    : null
+                }
                 onCursorHierarchyFocus={focusHierarchyNodeFromDocument}
                 onChange={(nextContent) => updateActiveSeriesDoc((doc) => setSeriesBodyNodes(doc, nextContent))}
               />
@@ -1475,10 +1819,14 @@ export function App() {
                         <h4 className="cms-section__title">Title</h4>
                         <label className="field-input" htmlFor="title-editor">
                           <span>Title</span>
-                          <input
+                          <CatalogCollaborativeTextInput
                             id="title-editor"
                             className="title-editor"
+                            fieldId={`${focusedNode.id}:title`}
+                            presence={catalogCursorByField[`${focusedNode.id}:title`] ?? []}
                             value={focusedNode.title}
+                            onCatalogCursor={publishCatalogCursor}
+                            onCatalogBlur={clearCatalogCursor}
                             onChange={(event) => {
                               const title = event.target.value;
                               applyHierarchyMetadataPatch(focusedNode.id, { title });
@@ -1496,10 +1844,14 @@ export function App() {
                               {fields.map((field) => (
                                 <CmsMetadataInput
                                   key={`${focusedNode.id}-${field.key}`}
+                                  fieldId={`${focusedNode.id}:meta:${field.key}`}
+                                  presence={catalogCursorByField[`${focusedNode.id}:meta:${field.key}`] ?? []}
                                   label={field.label}
                                   value={metadataByKey[field.key] ?? ''}
                                   placeholder={field.placeholder}
                                   multiline={field.multiline}
+                                  onCatalogCursor={publishCatalogCursor}
+                                  onCatalogBlur={clearCatalogCursor}
                                   onChange={(nextValue) =>
                                     applyHierarchyMetadataPatch(focusedNode.id, { [field.key]: nextValue })
                                   }
@@ -1549,6 +1901,10 @@ export function App() {
                                   <FieldInput
                                     key={field.fieldId}
                                     field={field}
+                                    fieldId={`${focusedNode.id}:item:${field.fieldId}`}
+                                    presence={catalogCursorByField[`${focusedNode.id}:item:${field.fieldId}`] ?? []}
+                                    onCatalogCursor={publishCatalogCursor}
+                                    onCatalogBlur={clearCatalogCursor}
                                     onChange={(value) => {
                                       updateActiveSeriesDoc((doc) =>
                                         updateItemFieldValue(doc, focusedNode.id, field.fieldId, value),
@@ -1725,18 +2081,31 @@ export function App() {
 
 type FieldInputProps = {
   field: ItemFieldModel;
+  fieldId: string;
+  presence: CatalogCursorPresence[];
+  onCatalogCursor: (fieldId: string, position: number | null) => void;
+  onCatalogBlur: () => void;
   onChange: (value: string | number | boolean | null) => void;
 };
 
-function FieldInput({ field, onChange }: FieldInputProps) {
+function FieldInput({ field, fieldId, presence, onCatalogCursor, onCatalogBlur, onChange }: FieldInputProps) {
   const selectOptions = getSelectOptions(field);
   const label = field.groupKey ? `${field.groupKey}.${field.key}` : field.key;
 
   if (field.valueType === 'boolean') {
     return (
       <label className="field-input field-input--boolean">
-        <span>{label}</span>
-        <input type="checkbox" checked={Boolean(field.value)} onChange={(event) => onChange(event.target.checked)} />
+        <span className="field-input__label-row">
+          <span>{label}</span>
+          <CatalogPresenceBadges presence={presence} />
+        </span>
+        <input
+          type="checkbox"
+          checked={Boolean(field.value)}
+          onFocus={() => onCatalogCursor(fieldId, null)}
+          onBlur={onCatalogBlur}
+          onChange={(event) => onChange(event.target.checked)}
+        />
       </label>
     );
   }
@@ -1744,10 +2113,17 @@ function FieldInput({ field, onChange }: FieldInputProps) {
   if (field.valueType === 'number') {
     return (
       <label className="field-input">
-        <span>{label}</span>
-        <input
+        <span className="field-input__label-row">
+          <span>{label}</span>
+          <CatalogPresenceBadges presence={presence} />
+        </span>
+        <CatalogCollaborativeTextInput
           type="number"
+          fieldId={fieldId}
+          presence={presence}
           value={field.value == null ? '' : String(field.value)}
+          onCatalogCursor={onCatalogCursor}
+          onCatalogBlur={onCatalogBlur}
           onChange={(event) => {
             const next = event.target.value.trim();
             if (next.length === 0) {
@@ -1768,8 +2144,16 @@ function FieldInput({ field, onChange }: FieldInputProps) {
   if (field.valueType === 'select' && selectOptions.length > 0) {
     return (
       <label className="field-input">
-        <span>{label}</span>
-        <select value={String(field.value ?? '')} onChange={(event) => onChange(event.target.value)}>
+        <span className="field-input__label-row">
+          <span>{label}</span>
+          <CatalogPresenceBadges presence={presence} />
+        </span>
+        <select
+          value={String(field.value ?? '')}
+          onFocus={() => onCatalogCursor(fieldId, null)}
+          onBlur={onCatalogBlur}
+          onChange={(event) => onChange(event.target.value)}
+        >
           {selectOptions.map((option) => (
             <option key={option} value={option}>
               {option}
@@ -1782,10 +2166,17 @@ function FieldInput({ field, onChange }: FieldInputProps) {
 
   return (
     <label className="field-input">
-      <span>{label}</span>
-      <input
+      <span className="field-input__label-row">
+        <span>{label}</span>
+        <CatalogPresenceBadges presence={presence} />
+      </span>
+      <CatalogCollaborativeTextInput
         type="text"
+        fieldId={fieldId}
+        presence={presence}
         value={field.value == null ? '' : String(field.value)}
+        onCatalogCursor={onCatalogCursor}
+        onCatalogBlur={onCatalogBlur}
         onChange={(event) => onChange(event.target.value)}
       />
     </label>
@@ -1793,29 +2184,250 @@ function FieldInput({ field, onChange }: FieldInputProps) {
 }
 
 type CmsMetadataInputProps = {
+  fieldId: string;
+  presence: CatalogCursorPresence[];
   label: string;
   value: string;
   placeholder: string;
   multiline?: boolean;
+  onCatalogCursor: (fieldId: string, position: number | null) => void;
+  onCatalogBlur: () => void;
   onChange: (value: string) => void;
 };
 
-function CmsMetadataInput({ label, value, placeholder, multiline, onChange }: CmsMetadataInputProps) {
+function CmsMetadataInput({
+  fieldId,
+  presence,
+  label,
+  value,
+  placeholder,
+  multiline,
+  onCatalogCursor,
+  onCatalogBlur,
+  onChange,
+}: CmsMetadataInputProps) {
   if (multiline) {
     return (
       <label className="field-input field-input--multiline">
-        <span>{label}</span>
-        <textarea value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+        <span className="field-input__label-row">
+          <span>{label}</span>
+          <CatalogPresenceBadges presence={presence} />
+        </span>
+        <CatalogCollaborativeTextarea
+          fieldId={fieldId}
+          presence={presence}
+          value={value}
+          placeholder={placeholder}
+          onCatalogCursor={onCatalogCursor}
+          onCatalogBlur={onCatalogBlur}
+          onChange={(event) => onChange(event.target.value)}
+        />
       </label>
     );
   }
 
   return (
     <label className="field-input">
-      <span>{label}</span>
-      <input type="text" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+      <span className="field-input__label-row">
+        <span>{label}</span>
+        <CatalogPresenceBadges presence={presence} />
+      </span>
+      <CatalogCollaborativeTextInput
+        type="text"
+        fieldId={fieldId}
+        presence={presence}
+        value={value}
+        placeholder={placeholder}
+        onCatalogCursor={onCatalogCursor}
+        onCatalogBlur={onCatalogBlur}
+        onChange={(event) => onChange(event.target.value)}
+      />
     </label>
   );
+}
+
+type CatalogCollaborativeInputProps = {
+  id?: string;
+  className?: string;
+  type?: 'text' | 'number';
+  fieldId: string;
+  value: string;
+  placeholder?: string;
+  presence: CatalogCursorPresence[];
+  onCatalogCursor: (fieldId: string, position: number | null) => void;
+  onCatalogBlur: () => void;
+  onChange: (event: ChangeEvent<HTMLInputElement>) => void;
+};
+
+function CatalogCollaborativeTextInput({
+  id,
+  className,
+  type = 'text',
+  fieldId,
+  value,
+  placeholder,
+  presence,
+  onCatalogCursor,
+  onCatalogBlur,
+  onChange,
+}: CatalogCollaborativeInputProps) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const carets = useMemo(() => {
+    const element = inputRef.current;
+    if (!element || presence.length === 0) {
+      return [] as Array<CatalogCursorPresence & { left: number }>;
+    }
+
+    return presence.map((entry) => ({
+      ...entry,
+      left: computeInputCaretLeft(element, value, entry.position),
+    }));
+  }, [presence, value]);
+
+  const reportCursor = useCallback(
+    (target: HTMLInputElement) => {
+      const rawPosition = target.selectionStart;
+      const position = typeof rawPosition === 'number' ? rawPosition : target.value.length;
+      onCatalogCursor(fieldId, position);
+    },
+    [fieldId, onCatalogCursor],
+  );
+
+  return (
+    <div className="catalog-cursor-field">
+      <input
+        ref={inputRef}
+        id={id}
+        className={className}
+        type={type}
+        value={value}
+        placeholder={placeholder}
+        onFocus={(event) => reportCursor(event.currentTarget)}
+        onKeyUp={(event) => reportCursor(event.currentTarget)}
+        onClick={(event) => reportCursor(event.currentTarget)}
+        onSelect={(event) => reportCursor(event.currentTarget)}
+        onBlur={onCatalogBlur}
+        onChange={onChange}
+      />
+      {carets.length > 0 ? (
+        <div className="catalog-cursor-field__overlay" aria-hidden="true">
+          {carets.map((entry) => (
+            <span
+              key={entry.id}
+              className="catalog-cursor-field__caret"
+              style={{ left: `${entry.left}px`, color: entry.color }}
+              title={`${entry.name} editing`}
+            >
+              <span className="catalog-cursor-field__caret-label">{userInitials(entry.name)}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+type CatalogCollaborativeTextareaProps = {
+  fieldId: string;
+  value: string;
+  placeholder?: string;
+  presence: CatalogCursorPresence[];
+  onCatalogCursor: (fieldId: string, position: number | null) => void;
+  onCatalogBlur: () => void;
+  onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
+};
+
+function CatalogCollaborativeTextarea({
+  fieldId,
+  value,
+  placeholder,
+  presence,
+  onCatalogCursor,
+  onCatalogBlur,
+  onChange,
+}: CatalogCollaborativeTextareaProps) {
+  const reportCursor = useCallback(
+    (target: HTMLTextAreaElement) => {
+      const rawPosition = target.selectionStart;
+      const position = typeof rawPosition === 'number' ? rawPosition : target.value.length;
+      onCatalogCursor(fieldId, position);
+    },
+    [fieldId, onCatalogCursor],
+  );
+
+  return (
+    <div className="catalog-cursor-field catalog-cursor-field--textarea">
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        onFocus={(event) => reportCursor(event.currentTarget)}
+        onKeyUp={(event) => reportCursor(event.currentTarget)}
+        onClick={(event) => reportCursor(event.currentTarget)}
+        onSelect={(event) => reportCursor(event.currentTarget)}
+        onBlur={onCatalogBlur}
+        onChange={onChange}
+      />
+      <CatalogPresenceBadges presence={presence} />
+    </div>
+  );
+}
+
+function CatalogPresenceBadges({ presence }: { presence: CatalogCursorPresence[] }) {
+  if (presence.length === 0) {
+    return null;
+  }
+
+  return (
+    <span className="catalog-presence-badges">
+      {presence.slice(0, 3).map((entry) => (
+        <span
+          key={entry.id}
+          className="catalog-presence-badges__chip"
+          style={{ backgroundColor: entry.color }}
+          title={`${entry.name} editing this field`}
+        >
+          {userInitials(entry.name)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function computeInputCaretLeft(element: HTMLInputElement, value: string, position: number | null): number {
+  const computed = window.getComputedStyle(element);
+  const paddingLeft = Number.parseFloat(computed.paddingLeft) || 0;
+  const paddingRight = Number.parseFloat(computed.paddingRight) || 0;
+  const maxLeft = Math.max(paddingLeft, element.clientWidth - paddingRight);
+  const length = value.length;
+  const cursorIndex = Math.max(0, Math.min(typeof position === 'number' ? position : length, length));
+  const textBeforeCursor = value.slice(0, cursorIndex);
+  const measuredText = measureTextWidth(computed, textBeforeCursor);
+  const rawLeft = paddingLeft + measuredText - element.scrollLeft;
+  return Math.max(paddingLeft, Math.min(rawLeft, maxLeft));
+}
+
+let cachedTextMeasureContext: CanvasRenderingContext2D | null = null;
+
+function measureTextWidth(computed: CSSStyleDeclaration, text: string): number {
+  if (typeof document === 'undefined') {
+    return text.length * 7;
+  }
+
+  if (!cachedTextMeasureContext) {
+    const canvas = document.createElement('canvas');
+    cachedTextMeasureContext = canvas.getContext('2d');
+  }
+
+  if (!cachedTextMeasureContext) {
+    return text.length * 7;
+  }
+
+  const fontSize = computed.fontSize || '14px';
+  const fontFamily = computed.fontFamily || 'sans-serif';
+  const fontWeight = computed.fontWeight || '400';
+  const fontStyle = computed.fontStyle || 'normal';
+  cachedTextMeasureContext.font = `${fontStyle} ${fontWeight} ${fontSize} ${fontFamily}`;
+  return cachedTextMeasureContext.measureText(text).width;
 }
 
 type CmsFieldGroup = {

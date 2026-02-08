@@ -1518,6 +1518,32 @@ body {
   padding: 0 0.14rem;
 }
 
+.collaboration-cursor__caret {
+  border-left: 2px solid currentColor;
+  border-right: 1px solid transparent;
+  margin-left: -1px;
+  margin-right: -1px;
+  pointer-events: none;
+  position: relative;
+  word-break: normal;
+}
+
+.collaboration-cursor__label {
+  position: absolute;
+  top: -1.45em;
+  left: -1px;
+  font-family: var(--font-sans);
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #ffffff;
+  background: currentColor;
+  border-radius: 0.32rem;
+  padding: 0.12rem 0.28rem;
+  white-space: nowrap;
+  user-select: none;
+}
+
 .inline-actions {
   margin-top: 0.75rem;
   display: grid;
@@ -1643,6 +1669,14 @@ body {
   gap: 0.3rem;
 }
 
+.field-input__label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
 .field-input span {
   font-size: 0.74rem;
   font-weight: 600;
@@ -1661,6 +1695,66 @@ body {
 .field-input--boolean input {
   width: 1rem;
   height: 1rem;
+}
+
+.catalog-presence-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.14rem;
+  flex-shrink: 0;
+}
+
+.catalog-presence-badges__chip {
+  min-width: 0.92rem;
+  height: 0.92rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 0.56rem;
+  font-weight: 700;
+  padding: 0 0.16rem;
+}
+
+.catalog-cursor-field {
+  position: relative;
+}
+
+.catalog-cursor-field__overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.catalog-cursor-field__caret {
+  position: absolute;
+  top: 0.33rem;
+  bottom: 0.33rem;
+  width: 0;
+  border-left: 2px solid currentColor;
+}
+
+.catalog-cursor-field__caret-label {
+  position: absolute;
+  top: -1.05rem;
+  left: -0.46rem;
+  font-family: var(--font-sans);
+  font-size: 0.54rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #ffffff;
+  background: currentColor;
+  border-radius: 0.28rem;
+  padding: 0.1rem 0.2rem;
+  white-space: nowrap;
+}
+
+.catalog-cursor-field--textarea .catalog-presence-badges {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.5rem;
+  z-index: 2;
 }
 
 .operations-panel {

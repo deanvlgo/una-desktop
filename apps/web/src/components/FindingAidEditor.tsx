@@ -1,11 +1,14 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { JSONContent, Mark, Node, mergeAttributes } from '@tiptap/core';
+import Collaboration from '@tiptap/extension-collaboration';
+import CollaborationCursor from '@tiptap/extension-collaboration-cursor';
 import Heading from '@tiptap/extension-heading';
 import Link from '@tiptap/extension-link';
 import Underline from '@tiptap/extension-underline';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
+import type { HocuspocusProvider } from '@hocuspocus/provider';
 
 import type { PMNode } from '../../../../src/contracts/types';
 
@@ -24,6 +27,10 @@ type FindingAidEditorProps = {
   hierarchyHeadings: HierarchyHeading[];
   focusedHierarchyId?: string;
   focusRequestKey?: number;
+  collaboration?: {
+    provider: HocuspocusProvider;
+    user: { name: string; color: string };
+  } | null;
   onCursorHierarchyFocus?: (hierarchyId: string) => void;
   onChange: (nextContent: PMNode[]) => void;
 };
@@ -365,6 +372,7 @@ export function FindingAidEditor({
   hierarchyHeadings,
   focusedHierarchyId,
   focusRequestKey = 0,
+  collaboration = null,
   onCursorHierarchyFocus,
   onChange,
 }: FindingAidEditorProps) {
@@ -375,6 +383,9 @@ export function FindingAidEditor({
   const onChangeRef = useRef(onChange);
   const contentSignature = useMemo(() => JSON.stringify(content), [content]);
   const hierarchySignature = useMemo(() => JSON.stringify(hierarchyHeadings), [hierarchyHeadings]);
+  const collaborationProvider = collaboration?.provider ?? null;
+  const collaborationUser = collaboration?.user ?? null;
+  const collaborationEnabled = Boolean(collaborationProvider && collaborationUser);
   const syncedContentSignatureRef = useRef(contentSignature);
   const syncedHierarchySignatureRef = useRef(hierarchySignature);
   const [sectionDepth, setSectionDepth] = useState(0);
@@ -386,18 +397,37 @@ export function FindingAidEditor({
   }, [hierarchyHeadings, onCursorHierarchyFocus, onChange]);
 
   const editor = useEditor({
-    extensions: [
-      StarterKit.configure({
-        heading: false,
-      }),
-      FindingAidHeading.configure({ levels: [1, 2, 3] }),
-      Underline,
-      Link.configure({
-        openOnClick: false,
-      }),
-      SuggestionInsertMark,
-      SuggestionDeleteNode,
-    ],
+    extensions: (() => {
+      const base = [
+        StarterKit.configure({
+          heading: false,
+          history: collaborationEnabled ? false : undefined,
+        }),
+        FindingAidHeading.configure({ levels: [1, 2, 3] }),
+        Underline,
+        Link.configure({
+          openOnClick: false,
+        }),
+        SuggestionInsertMark,
+        SuggestionDeleteNode,
+      ];
+
+      if (!collaborationEnabled || !collaborationProvider || !collaborationUser) {
+        return base;
+      }
+
+      return [
+        ...base,
+        Collaboration.configure({
+          document: collaborationProvider.document,
+          field: 'tiptap',
+        }),
+        CollaborationCursor.configure({
+          provider: collaborationProvider,
+          user: collaborationUser,
+        }),
+      ];
+    })(),
     content: contentToDoc(content, hierarchyHeadings),
     editorProps: {
       attributes: {
@@ -432,10 +462,23 @@ export function FindingAidEditor({
       lastReportedHierarchyIdRef.current = hierarchyId;
       onCursorHierarchyFocusRef.current?.(hierarchyId);
     },
-  }, []);
+  }, [collaborationEnabled, collaborationProvider, collaborationUser?.name, collaborationUser?.color]);
 
   useEffect(() => {
     if (!editor) {
+      return;
+    }
+
+    const shouldSeedEmptyCollabDoc =
+      collaborationEnabled && editor.isEmpty && (content.length > 0 || hierarchyHeadings.length > 0);
+
+    if (shouldSeedEmptyCollabDoc) {
+      isApplyingRef.current = true;
+      editor.commands.setContent(contentToDoc(content, hierarchyHeadings), false);
+      isApplyingRef.current = false;
+
+      syncedContentSignatureRef.current = contentSignature;
+      syncedHierarchySignatureRef.current = hierarchySignature;
       return;
     }
 
@@ -452,7 +495,7 @@ export function FindingAidEditor({
 
     syncedContentSignatureRef.current = contentSignature;
     syncedHierarchySignatureRef.current = hierarchySignature;
-  }, [content, contentSignature, editor, hierarchyHeadings, hierarchySignature]);
+  }, [collaborationEnabled, content, contentSignature, editor, hierarchyHeadings, hierarchySignature]);
 
   useEffect(() => {
     if (!editor || !focusedHierarchyId) {
