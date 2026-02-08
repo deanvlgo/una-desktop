@@ -22,6 +22,8 @@ export type HierarchyHeading = {
 type FindingAidEditorProps = {
   content: PMNode[];
   hierarchyHeadings: HierarchyHeading[];
+  focusedHierarchyId?: string;
+  focusRequestKey?: number;
   onChange: (nextContent: PMNode[]) => void;
 };
 
@@ -326,7 +328,13 @@ function EditorActionButton({
   );
 }
 
-export function FindingAidEditor({ content, hierarchyHeadings, onChange }: FindingAidEditorProps) {
+export function FindingAidEditor({
+  content,
+  hierarchyHeadings,
+  focusedHierarchyId,
+  focusRequestKey = 0,
+  onChange,
+}: FindingAidEditorProps) {
   const isApplyingRef = useRef(false);
   const hierarchyHeadingsRef = useRef(hierarchyHeadings);
   const onChangeRef = useRef(onChange);
@@ -396,6 +404,27 @@ export function FindingAidEditor({ content, hierarchyHeadings, onChange }: Findi
     syncedContentSignatureRef.current = contentSignature;
     syncedHierarchySignatureRef.current = hierarchySignature;
   }, [content, contentSignature, editor, hierarchyHeadings, hierarchySignature]);
+
+  useEffect(() => {
+    if (!editor || !focusedHierarchyId) {
+      return;
+    }
+
+    let headingPos: number | null = null;
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === 'heading' && String(node.attrs?.hierarchyId ?? '') === focusedHierarchyId) {
+        headingPos = pos;
+        return false;
+      }
+      return true;
+    });
+
+    if (headingPos == null) {
+      return;
+    }
+
+    editor.chain().focus(headingPos + 1).scrollIntoView().run();
+  }, [editor, focusedHierarchyId, focusRequestKey]);
 
   const setLink = useCallback(() => {
     if (!editor) {

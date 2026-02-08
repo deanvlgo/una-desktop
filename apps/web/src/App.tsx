@@ -148,8 +148,13 @@ const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
 export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>(() => createInitialWorkspace());
   const [focusStateByDoc, setFocusStateByDoc] = useState<FocusStateMap>({});
+  const [focusRequestKey, setFocusRequestKey] = useState(0);
   const [railPanelMode, setRailPanelMode] = useState<RailPanelMode>('collections');
   const [collectionSearch, setCollectionSearch] = useState('');
+  const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null);
+  const [collectionTitleMenuOpenId, setCollectionTitleMenuOpenId] = useState<string | null>(null);
+  const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
+  const [collectionTitleDraft, setCollectionTitleDraft] = useState('');
   const [debugMode, setDebugMode] = useState(() => {
     if (typeof window === 'undefined') {
       return false;
@@ -521,6 +526,33 @@ export function App() {
     [setActiveCollectionId],
   );
 
+  const beginCollectionTitleRename = useCallback(
+    (collectionId: string, title: string) => {
+      setCollectionTitleMenuOpenId(null);
+      setRenamingCollectionId(collectionId);
+      setCollectionTitleDraft(title);
+      setActiveCollectionId(collectionId);
+    },
+    [setActiveCollectionId],
+  );
+
+  const commitCollectionTitleRename = useCallback(
+    (collectionId: string) => {
+      if (renamingCollectionId !== collectionId) {
+        return;
+      }
+      const nextTitle = collectionTitleDraft.trim().length > 0 ? collectionTitleDraft.trim() : 'Untitled Collection';
+      renameCollectionTitle(collectionId, nextTitle);
+      setRenamingCollectionId(null);
+    },
+    [collectionTitleDraft, renameCollectionTitle, renamingCollectionId],
+  );
+
+  const cancelCollectionTitleRename = useCallback(() => {
+    setRenamingCollectionId(null);
+    setCollectionTitleDraft('');
+  }, []);
+
   const openSeriesInHierarchy = useCallback(
     (docName: string) => {
       setActiveSeriesDocName(docName);
@@ -535,6 +567,7 @@ export function App() {
         focusedId: id,
         expandedIds: new Set(state.expandedIds),
       }));
+      setFocusRequestKey((value) => value + 1);
     },
     [updateCurrentFocusState],
   );
@@ -1024,96 +1057,33 @@ export function App() {
           </div>
 
           <div className="workspace-header__meta">
-            <label className="workspace-header__title-wrap" htmlFor="active-collection-title">
-              <span className="sr-only">Active collection title</span>
-              <input
-                id="active-collection-title"
-                className="workspace-header__title-input"
-                value={activeCollectionTitle}
-                onChange={(event) => renameCollectionTitle(workspace.activeCollectionId, event.target.value)}
-              />
-            </label>
+            <div className="workspace-header__title-row">
+              <div className="workspace-header__title-wrap">
+                <h1 className="workspace-header__title-display" title={activeCollectionTitle}>
+                  {activeCollectionTitle}
+                </h1>
+              </div>
+            </div>
             <p className="workspace-header__sub">{activeCollectionDescriptionText}</p>
           </div>
         </div>
 
         <div className="header-actions">
           <p className="header-actions__institution">{activeInstitutionName}</p>
-          <div className="header-actions__controls">
-            <div className="mode-toggle" role="tablist" aria-label="Editor mode">
-              <button
-                type="button"
-                data-mode="document"
-                role="tab"
-                aria-selected={currentFocusState.mode === 'document'}
-                className={
-                  currentFocusState.mode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-                }
-                onClick={() =>
-                  updateCurrentFocusState((state) => ({
-                    ...state,
-                    mode: 'document',
-                    expandedIds: new Set(state.expandedIds),
-                  }))
-                }
-              >
-                Document View
-              </button>
+          <button type="button" className="header-user" title="Logged in user (placeholder)">
+            <span className="header-user__avatar">AR</span>
+          </button>
 
-              <button
-                type="button"
-                data-mode="focus"
-                role="tab"
-                aria-selected={currentFocusState.mode === 'focus'}
-                className={
-                  currentFocusState.mode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-                }
-                onClick={() =>
-                  updateCurrentFocusState((state) => ({
-                    ...state,
-                    mode: 'focus',
-                    expandedIds: new Set(state.expandedIds),
-                  }))
-                }
-              >
-                CMS / Focus View
-              </button>
-
-              <button
-                type="button"
-                data-mode="json"
-                role="tab"
-                aria-selected={currentFocusState.mode === 'json'}
-                className={
-                  currentFocusState.mode === 'json' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-                }
-                onClick={() =>
-                  updateCurrentFocusState((state) => ({
-                    ...state,
-                    mode: 'json',
-                    expandedIds: new Set(state.expandedIds),
-                  }))
-                }
-              >
-                JSON View
-              </button>
-            </div>
-
-            <button type="button" className="header-user" title="Logged in user (placeholder)">
-              <span className="header-user__avatar">AR</span>
+          {debugMode ? (
+            <button
+              type="button"
+              className="debug-toggle debug-toggle--active"
+              onClick={() => setDebugMode(false)}
+              title="Debug mode is active (Ctrl/Cmd+Shift+D toggles)"
+            >
+              Debug On
             </button>
-
-            {debugMode ? (
-              <button
-                type="button"
-                className="debug-toggle debug-toggle--active"
-                onClick={() => setDebugMode(false)}
-                title="Debug mode is active (Ctrl/Cmd+Shift+D toggles)"
-              >
-                Debug On
-              </button>
-            ) : null}
-          </div>
+          ) : null}
         </div>
       </header>
 
@@ -1124,7 +1094,7 @@ export function App() {
               <>
                 <h2>Collection Browser</h2>
                 <p className="browser-panel__hint">
-                  Select a collection, then choose and edit series in the hierarchy view.
+                  Select a collection to review details, then open its hierarchy.
                 </p>
                 <label className="collection-search">
                   <span>Search Collections</span>
@@ -1137,6 +1107,7 @@ export function App() {
                 </label>
                 <ul className="manifest-panel__series-list">
                   {filteredCollectionEntries.map((collection, index) => {
+                    const isExpanded = expandedCollectionId === collection.collectionId;
                     return (
                       <li key={collection.collectionId}>
                         <div
@@ -1148,11 +1119,21 @@ export function App() {
                         >
                           <div
                             className="manifest-series__open"
-                            onClick={() => openCollectionFromBrowser(collection.collectionId)}
+                            onClick={() => {
+                              setActiveCollectionId(collection.collectionId);
+                              setCollectionTitleMenuOpenId(null);
+                              setExpandedCollectionId((current) =>
+                                current === collection.collectionId ? null : collection.collectionId,
+                              );
+                            }}
                             onKeyDown={(event) => {
                               if (event.key === 'Enter' || event.key === ' ') {
                                 event.preventDefault();
-                                openCollectionFromBrowser(collection.collectionId);
+                                setActiveCollectionId(collection.collectionId);
+                                setCollectionTitleMenuOpenId(null);
+                                setExpandedCollectionId((current) =>
+                                  current === collection.collectionId ? null : collection.collectionId,
+                                );
                               }
                             }}
                             role="button"
@@ -1160,23 +1141,112 @@ export function App() {
                           >
                             <span className="manifest-series__order">{index + 1}</span>
                             <span className="manifest-series__body">
-                              <input
-                                type="text"
-                                className="manifest-series__title-input"
-                                value={collection.title}
-                                onClick={(event) => event.stopPropagation()}
-                                onKeyDown={(event) => event.stopPropagation()}
-                                onFocus={() => setActiveCollectionId(collection.collectionId)}
-                                onChange={(event) => renameCollectionTitle(collection.collectionId, event.target.value)}
-                              />
-                              <small>
-                                {collection.collectionId} · {collection.seriesRefs.length} series
-                              </small>
-                            </span>
-                            <span className="manifest-series__presence">
-                              {collection.activeCount} active {collection.activeCount === 1 ? 'user' : 'users'}
+                              <div className="manifest-series__title-row">
+                                {renamingCollectionId === collection.collectionId ? (
+                                  <input
+                                    type="text"
+                                    className="manifest-series__title-input"
+                                    value={collectionTitleDraft}
+                                    autoFocus
+                                    aria-label="Collection title"
+                                    onClick={(event) => event.stopPropagation()}
+                                    onKeyDown={(event) => {
+                                      event.stopPropagation();
+                                      if (event.key === 'Enter') {
+                                        event.preventDefault();
+                                        commitCollectionTitleRename(collection.collectionId);
+                                      } else if (event.key === 'Escape') {
+                                        event.preventDefault();
+                                        cancelCollectionTitleRename();
+                                      }
+                                    }}
+                                    onBlur={() => commitCollectionTitleRename(collection.collectionId)}
+                                    onChange={(event) => setCollectionTitleDraft(event.target.value)}
+                                  />
+                                ) : (
+                                  <span className="manifest-series__title-text" title={collection.title}>
+                                    {collection.title}
+                                  </span>
+                                )}
+
+                                <div className="title-menu title-menu--inline">
+                                  <button
+                                    type="button"
+                                    className="title-menu__trigger title-menu__trigger--small"
+                                    aria-label="Collection title actions"
+                                    aria-expanded={collectionTitleMenuOpenId === collection.collectionId}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setCollectionTitleMenuOpenId((current) =>
+                                        current === collection.collectionId ? null : collection.collectionId,
+                                      );
+                                    }}
+                                  >
+                                    <svg className="title-menu__icon" viewBox="0 0 24 24" aria-hidden="true">
+                                      <circle cx="6" cy="12" r="1.9" fill="currentColor" />
+                                      <circle cx="12" cy="12" r="1.9" fill="currentColor" />
+                                      <circle cx="18" cy="12" r="1.9" fill="currentColor" />
+                                    </svg>
+                                  </button>
+
+                                  {collectionTitleMenuOpenId === collection.collectionId ? (
+                                    <div
+                                      className="title-menu__panel title-menu__panel--inline"
+                                      role="menu"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      <button
+                                        type="button"
+                                        role="menuitem"
+                                        className="title-menu__item"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          beginCollectionTitleRename(collection.collectionId, collection.title);
+                                        }}
+                                      >
+                                        Rename
+                                      </button>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </div>
+                              {isExpanded ? (
+                                <div className="manifest-series__meta-stack">
+                                  <small>
+                                    {collection.activeCount} active {collection.activeCount === 1 ? 'user' : 'users'}
+                                  </small>
+                                </div>
+                              ) : null}
                             </span>
                           </div>
+
+                          {isExpanded ? (
+                            <div className="manifest-series__details">
+                              <dl className="manifest-series__facts">
+                                <div>
+                                  <dt>Collection ID</dt>
+                                  <dd>{collection.collectionId}</dd>
+                                </div>
+                                <div>
+                                  <dt>Description</dt>
+                                  <dd>{collection.description || 'No description provided.'}</dd>
+                                </div>
+                                <div>
+                                  <dt>Series</dt>
+                                  <dd>{collection.seriesRefs.length}</dd>
+                                </div>
+                              </dl>
+                              <div className="manifest-series__details-actions">
+                                <button
+                                  type="button"
+                                  className="manifest-series__explore"
+                                  onClick={() => openCollectionFromBrowser(collection.collectionId)}
+                                >
+                                  Explore Hierarchy
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
                       </li>
                     );
@@ -1250,13 +1320,74 @@ export function App() {
         </aside>
 
         <main className="workspace-main">
-          {currentFocusState.mode === 'document' ? (
-            <section className="panel document-panel">
-              <h2>Document View</h2>
+          <div className="workspace-main__mode-row">
+            <div className="mode-toggle" role="tablist" aria-label="Editor mode">
+              <button
+                type="button"
+                data-mode="document"
+                role="tab"
+                aria-selected={currentFocusState.mode === 'document'}
+                className={
+                  currentFocusState.mode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                }
+                onClick={() =>
+                  updateCurrentFocusState((state) => ({
+                    ...state,
+                    mode: 'document',
+                    expandedIds: new Set(state.expandedIds),
+                  }))
+                }
+              >
+                Finding Aid View
+              </button>
 
+              <button
+                type="button"
+                data-mode="focus"
+                role="tab"
+                aria-selected={currentFocusState.mode === 'focus'}
+                className={
+                  currentFocusState.mode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                }
+                onClick={() =>
+                  updateCurrentFocusState((state) => ({
+                    ...state,
+                    mode: 'focus',
+                    expandedIds: new Set(state.expandedIds),
+                  }))
+                }
+              >
+                CMS / Focus View
+              </button>
+
+              <button
+                type="button"
+                data-mode="json"
+                role="tab"
+                aria-selected={currentFocusState.mode === 'json'}
+                className={
+                  currentFocusState.mode === 'json' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                }
+                onClick={() =>
+                  updateCurrentFocusState((state) => ({
+                    ...state,
+                    mode: 'json',
+                    expandedIds: new Set(state.expandedIds),
+                  }))
+                }
+              >
+                JSON View
+              </button>
+            </div>
+          </div>
+
+          {currentFocusState.mode === 'document' ? (
+            <section className="panel document-panel" aria-label="Finding Aid view">
               <FindingAidEditor
                 content={seriesBodyNodes as PMNode[]}
                 hierarchyHeadings={hierarchyHeadings}
+                focusedHierarchyId={currentFocusState.focusedId ?? undefined}
+                focusRequestKey={focusRequestKey}
                 onChange={(nextContent) => updateActiveSeriesDoc((doc) => setSeriesBodyNodes(doc, nextContent))}
               />
 
@@ -1290,8 +1421,7 @@ export function App() {
               </div>
             </section>
           ) : currentFocusState.mode === 'focus' ? (
-            <section className="panel focus-panel cms-panel">
-              <h2>CMS / Focus View</h2>
+            <section className="panel focus-panel cms-panel" aria-label="CMS view">
               <p className="cms-panel__hint">Plain forms generated from the focused hierarchy node.</p>
 
               {focusedNode ? (
@@ -1421,8 +1551,7 @@ export function App() {
               )}
             </section>
           ) : (
-            <section className="panel json-panel">
-              <h2>JSON View</h2>
+            <section className="panel json-panel" aria-label="JSON view">
               <p className="json-panel__hint">
                 Source-of-truth data and transformed editor data used by the hierarchy, document, and CMS screens.
               </p>
@@ -1440,7 +1569,7 @@ export function App() {
                     The hierarchy widget edits node structure and metadata; those updates synchronize into both Document and CMS views.
                   </li>
                   <li>
-                    Document view renders a Word-style composite doc by combining canonical `seriesBody` with synthetic hierarchy headings.
+                    Finding Aid view renders a Word-style composite doc by combining canonical `seriesBody` with synthetic hierarchy headings.
                   </li>
                   <li>
                     CMS view is generated from the currently focused hierarchy node and writes metadata straight back to canonical JSON.

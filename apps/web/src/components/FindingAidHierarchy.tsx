@@ -659,7 +659,11 @@ export function FindingAidHierarchy({
                           aria-label="Open row actions"
                           aria-expanded={actionMenuOpenId === entry.id}
                         >
-                          …
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <circle cx="6" cy="12" r="1.9" fill="currentColor" />
+                            <circle cx="12" cy="12" r="1.9" fill="currentColor" />
+                            <circle cx="18" cy="12" r="1.9" fill="currentColor" />
+                          </svg>
                         </button>
                       ) : null}
                     </div>
