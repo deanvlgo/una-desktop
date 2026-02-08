@@ -1479,13 +1479,13 @@ body {
 }
 
 .finding-aid__editor-page {
-  width: min(880px, 100%);
+  width: 100%;
   margin: 0 auto;
   min-height: 520px;
-  background: #ffffff;
-  border: 1px solid #ddd8cf;
-  box-shadow: 0 15px 24px rgba(15, 23, 42, 0.08);
-  padding: 1.1rem 1.25rem;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
 }
 
 .finding-aid__prose {
@@ -1495,6 +1495,29 @@ body {
   font-family: var(--font-serif);
   font-size: 1rem;
   line-height: 1.58;
+}
+
+.finding-aid__prose--paginated {
+  min-height: 0;
+}
+
+.finding-aid__prose--paginated [data-page] {
+  box-shadow: 0 15px 24px rgba(15, 23, 42, 0.08);
+  border-color: #ddd8cf !important;
+  border-style: solid;
+}
+
+.finding-aid__prose--paginated [data-page-body] {
+  border: 0 !important;
+  display: flow-root;
+}
+
+.finding-aid__prose--paginated [data-page-body] > :first-child {
+  margin-top: 0 !important;
+}
+
+.finding-aid__prose--paginated [data-page-body] > :last-child {
+  margin-bottom: 0 !important;
 }
 
 .finding-aid__prose p {
@@ -1530,6 +1553,14 @@ body {
   padding: 0.28rem 0.55rem;
   margin-top: 0.68rem;
   margin-bottom: 0.42rem;
+}
+
+.finding-aid__prose--paginated h1[data-hierarchy-id],
+.finding-aid__prose--paginated h2[data-hierarchy-id],
+.finding-aid__prose--paginated h3[data-hierarchy-id] {
+  margin-top: 0.56rem;
+  margin-bottom: 0.36rem;
+  break-after: avoid-page;
 }
 
 .finding-aid__prose h1[data-hierarchy-level='series'],
@@ -2077,7 +2108,7 @@ body {
 
   .finding-aid__editor-page {
     min-height: 420px;
-    padding: 0.9rem;
+    padding: 0;
   }
 
   .finding-aid__prose {

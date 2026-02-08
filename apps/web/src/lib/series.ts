@@ -1,4 +1,5 @@
 import type { ItemType, PMNode, SeriesDoc, ValueType } from '../../../../src/contracts/types';
+import { formatHierarchyNodeHeading, toRomanNumeral } from './hierarchyLabels';
 
 export type UUID = string;
 
@@ -828,12 +829,13 @@ function flattenHierarchyHeadings(root: HierarchyNode): HierarchyHeadingEntry[] 
   const headings: HierarchyHeadingEntry[] = [];
 
   const walk = (node: HierarchyNode, depth: number, path: number[]) => {
+    const ordinal = depth === 0 ? 1 : path[path.length - 1] ?? 1;
     headings.push({
       id: node.id,
       level: node.level,
       title: node.title,
       depth,
-      pathLabel: path.join('.'),
+      pathLabel: toRomanNumeral(ordinal),
     });
 
     for (let index = 0; index < node.children.length; index += 1) {
@@ -901,7 +903,6 @@ function writeSeriesBodySections(doc: SeriesDoc, sections: Map<UUID, PMNode[]>):
 
 function buildHierarchySectionHeadingNode(heading: HierarchyHeadingEntry): PMNode {
   const level = Math.max(1, Math.min(heading.depth + 1, 3)) as 1 | 2 | 3;
-  const labelPrefix = heading.pathLabel.length > 0 ? `${heading.pathLabel} ` : '';
   return {
     type: 'heading',
     attrs: {
@@ -913,7 +914,7 @@ function buildHierarchySectionHeadingNode(heading: HierarchyHeadingEntry): PMNod
     content: [
       {
         type: 'text',
-        text: `${labelPrefix}${heading.title}`,
+        text: formatHierarchyNodeHeading(heading.level, heading.pathLabel, heading.title),
       },
     ],
   };

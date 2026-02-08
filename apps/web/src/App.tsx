@@ -62,6 +62,7 @@ import {
   type HierarchyNode,
   type ItemFieldModel,
 } from './lib/series';
+import { formatHierarchyNodeHeading, getHierarchyLevelLabel, toRomanNumeral } from './lib/hierarchyLabels';
 import { userInitials } from './lib/user';
 import { CollabClient, buildCollabSeeds } from './lib/collab';
 
@@ -696,6 +697,14 @@ export function App() {
     }
     return flattenHierarchyHeadingsForDocument(activeHierarchy);
   }, [activeHierarchy]);
+
+  const hierarchyOrdinalById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const heading of hierarchyHeadings) {
+      map[heading.id] = heading.pathLabel;
+    }
+    return map;
+  }, [hierarchyHeadings]);
 
   const seriesBodyNodes = useMemo(() => {
     if (!activeSeriesDoc) {
@@ -1410,6 +1419,10 @@ export function App() {
   const activeCollectionDescriptionText =
     activeCollectionDescription.length > 0 ? activeCollectionDescription : 'No collection description provided yet.';
   const visibleMode = !jsonViewDebugMode && currentFocusState.mode === 'json' ? 'document' : currentFocusState.mode;
+  const focusedNodeOrdinal = focusedNode ? hierarchyOrdinalById[focusedNode.id] ?? 'I' : 'I';
+  const focusedCatalogHeading = focusedNode
+    ? formatHierarchyNodeHeading(focusedNode.level, focusedNodeOrdinal, focusedNode.title)
+    : '';
 
   return (
     <div className="app-shell">
@@ -1809,10 +1822,10 @@ export function App() {
                 >
                   <header className="cms-shell__header">
                     <div>
-                      <span className="cms-shell__level">{focusedNode.level.toUpperCase()}</span>
-                      <h3 className="cms-screen-title">
-                        {focusedNode.title.trim().length > 0 ? focusedNode.title : `Untitled ${focusedNode.level}`}
-                      </h3>
+                      <span className="cms-shell__level">
+                        {getHierarchyLevelLabel(focusedNode.level).toUpperCase()} {focusedNodeOrdinal}
+                      </span>
+                      <h3 className="cms-screen-title">{focusedCatalogHeading}</h3>
                       <p className="cms-screen-subtitle">Catalog Record</p>
                     </div>
                     {focusedNode.itemType ? <span className="cms-shell__item-type">{focusedNode.itemType}</span> : null}
@@ -2666,12 +2679,13 @@ function flattenHierarchyHeadingsForDocument(root: HierarchyNode): HierarchyHead
   const headings: HierarchyHeading[] = [];
 
   const walk = (node: HierarchyNode, depth: number, path: number[]) => {
+    const ordinal = depth === 0 ? 1 : path[path.length - 1] ?? 1;
     headings.push({
       id: node.id,
       level: node.level,
       title: node.title,
       depth,
-      pathLabel: path.join('.'),
+      pathLabel: toRomanNumeral(ordinal),
     });
 
     for (let index = 0; index < node.children.length; index += 1) {

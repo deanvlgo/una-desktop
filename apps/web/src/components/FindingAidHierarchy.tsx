@@ -7,6 +7,7 @@ import {
   type HierarchyLevel,
   type HierarchyNode,
 } from '../lib/series';
+import { toRomanNumeral } from '../lib/hierarchyLabels';
 import { userInitials } from '../lib/user';
 
 type PresenceUser = { id: string; name: string; color: string };
@@ -115,7 +116,7 @@ export function FindingAidHierarchy({
         hasActiveSeriesRow = true;
         return {
           ...activeRoot,
-          pathLabel: String(index + 1),
+          pathLabel: toRomanNumeral(index + 1),
           isActiveSeries: true,
           seriesDocName: series.docName,
           seriesPresenceCount: series.presenceCount,
@@ -131,7 +132,7 @@ export function FindingAidHierarchy({
         hasChildren: true,
         expanded: false,
         isFocused: false,
-        pathLabel: String(index + 1),
+        pathLabel: toRomanNumeral(index + 1),
         kind: 'seriesRef',
         seriesDocName: series.docName,
         seriesPresenceCount: series.presenceCount,
@@ -148,7 +149,7 @@ export function FindingAidHierarchy({
         seriesDocName: activeSeriesDocName,
         seriesPresenceCount:
           activeOptionIndex >= 0 ? seriesOptions[activeOptionIndex]?.presenceCount : activeRoot.seriesPresenceCount,
-        pathLabel: activeOptionIndex >= 0 ? String(activeOptionIndex + 1) : activeRoot.pathLabel,
+        pathLabel: activeOptionIndex >= 0 ? toRomanNumeral(activeOptionIndex + 1) : activeRoot.pathLabel,
       });
       stitched.push(...activeDescendants);
       stitched.push(...seriesRows);
@@ -827,6 +828,7 @@ function flattenVisibleHierarchy(
     path: number[],
   ) => {
     const expanded = isExpandedByPolicy(node.id, focusState, focusedAncestors);
+    const ordinal = depth === 0 ? 1 : path[path.length - 1] ?? 1;
     entries.push({
       id: node.id,
       parentId,
@@ -836,7 +838,7 @@ function flattenVisibleHierarchy(
       hasChildren: node.children.length > 0,
       expanded,
       isFocused: focusState.focusedId === node.id,
-      pathLabel: path.join('.'),
+      pathLabel: toRomanNumeral(ordinal),
       kind: 'node',
       isActiveSeries: depth === 0,
     });

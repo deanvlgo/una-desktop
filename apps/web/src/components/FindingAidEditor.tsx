@@ -9,8 +9,10 @@ import Underline from '@tiptap/extension-underline';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import type { HocuspocusProvider } from '@hocuspocus/provider';
+import PaginationExtension, { BodyNode, HeaderFooterNode, PageNode } from 'tiptap-extension-pagination';
 
 import type { PMNode } from '../../../../src/contracts/types';
+import { formatHierarchyNodeHeading } from '../lib/hierarchyLabels';
 
 type HierarchyLevel = 'series' | 'subseries' | 'file' | 'item';
 
@@ -179,7 +181,6 @@ function buildHierarchyHeadingNodes(headings: HierarchyHeading[]): PMNode[] {
 
   for (const heading of headings) {
     const level = Math.max(1, Math.min(heading.depth + 1, 3)) as 1 | 2 | 3;
-    const labelPrefix = heading.pathLabel.length > 0 ? `${heading.pathLabel} ` : '';
 
     nodes.push({
       type: 'heading',
@@ -192,7 +193,7 @@ function buildHierarchyHeadingNodes(headings: HierarchyHeading[]): PMNode[] {
       content: [
         {
           type: 'text',
-          text: `${labelPrefix}${heading.title}`,
+          text: formatHierarchyNodeHeading(heading.level, heading.pathLabel, heading.title),
         },
       ],
     });
@@ -274,7 +275,40 @@ function readContentFromEditor(json: JSONContent): PMNode[] {
     return [];
   }
 
-  return json.content as unknown as PMNode[];
+  const nodes = json.content as unknown as PMNode[];
+  return flattenPaginationNodes(nodes);
+}
+
+function flattenPaginationNodes(nodes: PMNode[]): PMNode[] {
+  const flattened: PMNode[] = [];
+
+  for (const node of nodes) {
+    if (node.type === 'page') {
+      const regions = Array.isArray(node.content) ? (node.content as PMNode[]) : [];
+      const bodyNode = regions.find((region) => region.type === 'body');
+      const bodyContent = Array.isArray(bodyNode?.content) ? (bodyNode.content as PMNode[]) : [];
+      for (const child of bodyContent) {
+        flattened.push(structuredClone(child));
+      }
+      continue;
+    }
+
+    if (node.type === 'body') {
+      const bodyContent = Array.isArray(node.content) ? (node.content as PMNode[]) : [];
+      for (const child of bodyContent) {
+        flattened.push(structuredClone(child));
+      }
+      continue;
+    }
+
+    if (node.type === 'header-footer') {
+      continue;
+    }
+
+    flattened.push(structuredClone(node));
+  }
+
+  return flattened;
 }
 
 function isHierarchyHeadingNode(node: PMNode): boolean {
@@ -410,6 +444,22 @@ export function FindingAidEditor({
         }),
         SuggestionInsertMark,
         SuggestionDeleteNode,
+        PaginationExtension.configure({
+          defaultPaperSize: 'Letter',
+          defaultMarginConfig: {
+            top: 14,
+            right: 14,
+            bottom: 14,
+            left: 14,
+          },
+          pageAmendmentOptions: {
+            enableHeader: false,
+            enableFooter: false,
+          },
+        }),
+        PageNode,
+        HeaderFooterNode,
+        BodyNode,
       ];
 
       if (!collaborationEnabled || !collaborationProvider || !collaborationUser) {
@@ -431,7 +481,7 @@ export function FindingAidEditor({
     content: contentToDoc(content, hierarchyHeadings),
     editorProps: {
       attributes: {
-        class: 'finding-aid__prose',
+        class: 'finding-aid__prose finding-aid__prose--paginated',
       },
     },
     onUpdate: ({ editor: current }) => {
