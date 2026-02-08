@@ -14,6 +14,8 @@ type DocSeed = {
 };
 
 type PresenceState = {
+  clientId: number;
+  isLocal: boolean;
   user: CollabUser;
   focusId: string | null;
   catalogCursor: {
@@ -205,15 +207,17 @@ export class CollabClient {
         continue;
       }
 
-      const states = Array.from(awareness.getStates().values());
+      const states = Array.from(awareness.getStates().entries());
       byDoc[docName] = states
-        .map((raw) => {
+        .map(([clientId, raw]) => {
           const user = raw?.user as CollabUser | undefined;
           if (!user || !user.id || !user.name) {
             return null;
           }
 
           return {
+            clientId,
+            isLocal: clientId === awareness.clientID,
             user,
             focusId: typeof raw?.focusId === 'string' ? raw.focusId : null,
             catalogCursor:

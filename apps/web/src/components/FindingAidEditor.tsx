@@ -482,10 +482,18 @@ export function FindingAidEditor({
       return;
     }
 
-    if (
-      contentSignature === syncedContentSignatureRef.current &&
-      hierarchySignature === syncedHierarchySignatureRef.current
-    ) {
+    const contentChanged = contentSignature !== syncedContentSignatureRef.current;
+    const hierarchyChanged = hierarchySignature !== syncedHierarchySignatureRef.current;
+
+    if (!contentChanged && !hierarchyChanged) {
+      return;
+    }
+
+    // In collaborative mode, TipTap+Yjs already applies body text changes live.
+    // Re-applying setContent on each mirrored canonical update can duplicate content.
+    if (collaborationEnabled && !hierarchyChanged) {
+      syncedContentSignatureRef.current = contentSignature;
+      syncedHierarchySignatureRef.current = hierarchySignature;
       return;
     }
 

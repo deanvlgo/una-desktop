@@ -208,6 +208,7 @@ export function App() {
     }
     return new URLSearchParams(window.location.search).get('debug') === '1';
   });
+  const [jsonViewDebugMode, setJsonViewDebugMode] = useState(false);
   const [exportPreview, setExportPreview] = useState('');
   const [logVersion, setLogVersion] = useState(0);
   const [presenceByNodeId, setPresenceByNodeId] = useState<PresenceMap>({});
@@ -396,6 +397,18 @@ export function App() {
     }));
   }, [activeHierarchy, currentFocusState, updateCurrentFocusState]);
 
+  useEffect(() => {
+    if (!currentFocusState || jsonViewDebugMode || currentFocusState.mode !== 'json') {
+      return;
+    }
+
+    updateCurrentFocusState((state) => ({
+      ...state,
+      mode: 'document',
+      expandedIds: new Set(state.expandedIds),
+    }));
+  }, [currentFocusState, jsonViewDebugMode, updateCurrentFocusState]);
+
   const applyWorkspaceFromCollab = useCallback((changedDocName?: string) => {
     const collab = collabClientRef.current;
     if (!collab) {
@@ -503,7 +516,7 @@ export function App() {
     }
 
     for (const state of activeDocPresence) {
-      if (state.user.id === LOCAL_USER.id || !state.catalogCursor?.fieldId) {
+      if (state.isLocal || !state.catalogCursor?.fieldId) {
         continue;
       }
 
@@ -1396,6 +1409,7 @@ export function App() {
   const activeCollectionTitle = String(manifestRoot.attrs?.title ?? 'Untitled Collection');
   const activeCollectionDescriptionText =
     activeCollectionDescription.length > 0 ? activeCollectionDescription : 'No collection description provided yet.';
+  const visibleMode = !jsonViewDebugMode && currentFocusState.mode === 'json' ? 'document' : currentFocusState.mode;
 
   return (
     <div className="app-shell">
@@ -1403,7 +1417,7 @@ export function App() {
         <div className="workspace-header__brand">
           <div className="workspace-header__logo-stack">
             <img src={historiqLogo} alt="Historiq" className="workspace-header__logo" />
-            <p className="workspace-header__kicker">Collaborative Editor</p>
+            <p className="workspace-header__kicker">Una Collaborative Editor</p>
           </div>
 
           <div className="workspace-header__meta">
@@ -1423,17 +1437,6 @@ export function App() {
           <button type="button" className="header-user" title="Logged in user (placeholder)">
             <span className="header-user__avatar">{LOCAL_USER_INITIALS}</span>
           </button>
-
-          {debugMode ? (
-            <button
-              type="button"
-              className="debug-toggle debug-toggle--active"
-              onClick={() => setDebugMode(false)}
-              title="Debug mode is active (Ctrl/Cmd+Shift+D toggles)"
-            >
-              Debug On
-            </button>
-          ) : null}
         </div>
       </header>
 
@@ -1676,9 +1679,9 @@ export function App() {
                 type="button"
                 data-mode="document"
                 role="tab"
-                aria-selected={currentFocusState.mode === 'document'}
+                aria-selected={visibleMode === 'document'}
                 className={
-                  currentFocusState.mode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                  visibleMode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
                 }
                 onClick={() =>
                   updateCurrentFocusState((state) => ({
@@ -1695,9 +1698,9 @@ export function App() {
                 type="button"
                 data-mode="focus"
                 role="tab"
-                aria-selected={currentFocusState.mode === 'focus'}
+                aria-selected={visibleMode === 'focus'}
                 className={
-                  currentFocusState.mode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                  visibleMode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
                 }
                 onClick={() =>
                   updateCurrentFocusState((state) => ({
@@ -1710,28 +1713,41 @@ export function App() {
                 Catalog View
               </button>
 
-              <button
-                type="button"
-                data-mode="json"
-                role="tab"
-                aria-selected={currentFocusState.mode === 'json'}
-                className={
-                  currentFocusState.mode === 'json' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-                }
-                onClick={() =>
-                  updateCurrentFocusState((state) => ({
-                    ...state,
-                    mode: 'json',
-                    expandedIds: new Set(state.expandedIds),
-                  }))
-                }
-              >
-                JSON View
-              </button>
+              {jsonViewDebugMode ? (
+                <button
+                  type="button"
+                  data-mode="json"
+                  role="tab"
+                  aria-selected={visibleMode === 'json'}
+                  className={visibleMode === 'json' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'}
+                  onClick={() =>
+                    updateCurrentFocusState((state) => ({
+                      ...state,
+                      mode: 'json',
+                      expandedIds: new Set(state.expandedIds),
+                    }))
+                  }
+                >
+                  JSON View
+                </button>
+              ) : null}
             </div>
+            <button
+              type="button"
+              className={jsonViewDebugMode ? 'debug-toggle debug-toggle--active' : 'debug-toggle'}
+              aria-pressed={jsonViewDebugMode}
+              onClick={() => setJsonViewDebugMode((value) => !value)}
+              title={`Debug mode ${jsonViewDebugMode ? 'on' : 'off'}`}
+            >
+              <span className="debug-toggle__label">Debug</span>
+              <span className="debug-toggle__switch" aria-hidden="true">
+                <span className="debug-toggle__thumb" />
+              </span>
+              <span className="debug-toggle__state">{jsonViewDebugMode ? 'On' : 'Off'}</span>
+            </button>
           </div>
 
-          {currentFocusState.mode === 'document' ? (
+          {visibleMode === 'document' ? (
             <section className="panel document-panel" aria-label="Finding Aid view">
               <FindingAidEditor
                 content={seriesBodyNodes as PMNode[]}
@@ -1782,7 +1798,7 @@ export function App() {
                 ) : null}
               </div>
             </section>
-          ) : currentFocusState.mode === 'focus' ? (
+          ) : visibleMode === 'focus' ? (
             <section className="panel focus-panel cms-panel" aria-label="Catalog view">
               <p className="cms-panel__hint">Plain forms generated from the focused hierarchy node.</p>
 
@@ -1794,7 +1810,10 @@ export function App() {
                   <header className="cms-shell__header">
                     <div>
                       <span className="cms-shell__level">{focusedNode.level.toUpperCase()}</span>
-                      <h3 className="cms-screen-title">{renderCmsScreenTitle(focusedNode.level)}</h3>
+                      <h3 className="cms-screen-title">
+                        {focusedNode.title.trim().length > 0 ? focusedNode.title : `Untitled ${focusedNode.level}`}
+                      </h3>
+                      <p className="cms-screen-subtitle">Catalog Record</p>
                     </div>
                     {focusedNode.itemType ? <span className="cms-shell__item-type">{focusedNode.itemType}</span> : null}
                   </header>
@@ -2303,6 +2322,7 @@ function CatalogCollaborativeTextInput({
         value={value}
         placeholder={placeholder}
         onFocus={(event) => reportCursor(event.currentTarget)}
+        onInput={(event) => reportCursor(event.currentTarget)}
         onKeyUp={(event) => reportCursor(event.currentTarget)}
         onClick={(event) => reportCursor(event.currentTarget)}
         onSelect={(event) => reportCursor(event.currentTarget)}
@@ -2346,6 +2366,19 @@ function CatalogCollaborativeTextarea({
   onCatalogBlur,
   onChange,
 }: CatalogCollaborativeTextareaProps) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const carets = useMemo(() => {
+    const element = textareaRef.current;
+    if (!element || presence.length === 0) {
+      return [] as Array<CatalogCursorPresence & { left: number; top: number }>;
+    }
+
+    return presence.map((entry) => ({
+      ...entry,
+      ...computeTextareaCaretPosition(element, value, entry.position),
+    }));
+  }, [presence, value]);
+
   const reportCursor = useCallback(
     (target: HTMLTextAreaElement) => {
       const rawPosition = target.selectionStart;
@@ -2358,15 +2391,31 @@ function CatalogCollaborativeTextarea({
   return (
     <div className="catalog-cursor-field catalog-cursor-field--textarea">
       <textarea
+        ref={textareaRef}
         value={value}
         placeholder={placeholder}
         onFocus={(event) => reportCursor(event.currentTarget)}
+        onInput={(event) => reportCursor(event.currentTarget)}
         onKeyUp={(event) => reportCursor(event.currentTarget)}
         onClick={(event) => reportCursor(event.currentTarget)}
         onSelect={(event) => reportCursor(event.currentTarget)}
         onBlur={onCatalogBlur}
         onChange={onChange}
       />
+      {carets.length > 0 ? (
+        <div className="catalog-cursor-field__overlay" aria-hidden="true">
+          {carets.map((entry) => (
+            <span
+              key={`${entry.id}-${entry.position ?? 'null'}`}
+              className="catalog-cursor-field__caret catalog-cursor-field__caret--textarea"
+              style={{ left: `${entry.left}px`, top: `${entry.top}px`, color: entry.color }}
+              title={`${entry.name} editing`}
+            >
+              <span className="catalog-cursor-field__caret-label">{userInitials(entry.name)}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
       <CatalogPresenceBadges presence={presence} />
     </div>
   );
@@ -2404,6 +2453,68 @@ function computeInputCaretLeft(element: HTMLInputElement, value: string, positio
   const measuredText = measureTextWidth(computed, textBeforeCursor);
   const rawLeft = paddingLeft + measuredText - element.scrollLeft;
   return Math.max(paddingLeft, Math.min(rawLeft, maxLeft));
+}
+
+function computeTextareaCaretPosition(
+  element: HTMLTextAreaElement,
+  value: string,
+  position: number | null,
+): { left: number; top: number } {
+  const computed = window.getComputedStyle(element);
+  const paddingLeft = Number.parseFloat(computed.paddingLeft) || 0;
+  const paddingRight = Number.parseFloat(computed.paddingRight) || 0;
+  const paddingTop = Number.parseFloat(computed.paddingTop) || 0;
+  const lineHeight = Number.parseFloat(computed.lineHeight) || 16;
+  const length = value.length;
+  const cursorIndex = Math.max(0, Math.min(typeof position === 'number' ? position : length, length));
+
+  if (typeof document === 'undefined') {
+    return { left: paddingLeft, top: paddingTop };
+  }
+
+  const mirror = document.createElement('div');
+  const style = mirror.style;
+  style.position = 'absolute';
+  style.visibility = 'hidden';
+  style.pointerEvents = 'none';
+  style.left = '-9999px';
+  style.top = '0';
+  style.width = `${element.clientWidth}px`;
+  style.boxSizing = computed.boxSizing;
+  style.border = computed.border;
+  style.padding = computed.padding;
+  style.fontFamily = computed.fontFamily;
+  style.fontSize = computed.fontSize;
+  style.fontWeight = computed.fontWeight;
+  style.fontStyle = computed.fontStyle;
+  style.letterSpacing = computed.letterSpacing;
+  style.lineHeight = computed.lineHeight;
+  style.textTransform = computed.textTransform;
+  style.textIndent = computed.textIndent;
+  style.whiteSpace = 'pre-wrap';
+  style.overflowWrap = 'break-word';
+  style.wordBreak = 'break-word';
+
+  const beforeCursor = value.slice(0, cursorIndex);
+  mirror.textContent = beforeCursor;
+  if (beforeCursor.endsWith('\n')) {
+    mirror.textContent += '\u200b';
+  }
+
+  const marker = document.createElement('span');
+  marker.textContent = value.slice(cursorIndex) || '\u200b';
+  mirror.appendChild(marker);
+
+  document.body.appendChild(mirror);
+  const rawLeft = marker.offsetLeft - element.scrollLeft;
+  const rawTop = marker.offsetTop - element.scrollTop;
+  document.body.removeChild(mirror);
+
+  const maxLeft = Math.max(paddingLeft, element.clientWidth - paddingRight);
+  return {
+    left: Math.max(paddingLeft, Math.min(rawLeft, maxLeft)),
+    top: Math.max(paddingTop, rawTop + lineHeight * 0.1),
+  };
 }
 
 let cachedTextMeasureContext: CanvasRenderingContext2D | null = null;
@@ -2549,19 +2660,6 @@ function readManifestSeriesRefs(manifest: CollectionManifestDoc): ManifestSeries
   }
 
   return refs.sort((a, b) => a.order - b.order);
-}
-
-function renderCmsScreenTitle(level: 'series' | 'subseries' | 'file' | 'item'): string {
-  if (level === 'series') {
-    return 'Series Data Entry Screen';
-  }
-  if (level === 'subseries') {
-    return 'Subseries Data Entry Screen';
-  }
-  if (level === 'file') {
-    return 'File Data Entry Screen';
-  }
-  return 'Item Data Entry Screen';
 }
 
 function flattenHierarchyHeadingsForDocument(root: HierarchyNode): HierarchyHeading[] {
