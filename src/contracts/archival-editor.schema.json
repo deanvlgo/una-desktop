@@ -1,0 +1,398 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/archival-editor.schema.json",
+  "title": "Archival Editor ProseMirror JSON",
+  "oneOf": [
+    { "$ref": "#/$defs/CollectionManifestDoc" },
+    { "$ref": "#/$defs/SeriesDoc" }
+  ],
+  "$defs": {
+    "UUID": { "type": "string", "minLength": 1 },
+    "EpochMs": { "type": "integer", "minimum": 0 },
+
+    "PMText": {
+      "type": "object",
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "text" },
+        "text": { "type": "string" },
+        "marks": { "type": "array", "items": { "$ref": "#/$defs/PMMark" } }
+      },
+      "additionalProperties": false
+    },
+
+    "PMMark": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string" },
+        "attrs": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "GenericBlockNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string" },
+        "attrs": { "type": "object" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/GenericNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "GenericNode": {
+      "oneOf": [
+        { "$ref": "#/$defs/PMText" },
+        { "$ref": "#/$defs/SuggestionDeleteNode" },
+        { "$ref": "#/$defs/SuggestionBlockNode" },
+        { "$ref": "#/$defs/FieldNode" },
+        { "$ref": "#/$defs/FieldGroupNode" },
+        { "$ref": "#/$defs/GenericBlockNode" }
+      ]
+    },
+
+    "CollectionManifestDoc": {
+      "type": "object",
+      "required": ["type", "content"],
+      "properties": {
+        "type": { "const": "doc" },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/CollectionManifestNode" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "CollectionManifestNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "collectionManifest" },
+        "attrs": {
+          "type": "object",
+          "required": ["collectionId", "title"],
+          "properties": {
+            "collectionId": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "dates": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/CollectionMetaNode" },
+              { "$ref": "#/$defs/SeriesRefNode" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "CollectionMetaNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "collectionMeta" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/GenericNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesRefNode": {
+      "type": "object",
+      "required": ["type", "attrs"],
+      "properties": {
+        "type": { "const": "seriesRef" },
+        "attrs": {
+          "type": "object",
+          "required": ["seriesId", "title", "order", "docName"],
+          "properties": {
+            "seriesId": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "order": { "type": "number" },
+            "docName": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesDoc": {
+      "type": "object",
+      "required": ["type", "content"],
+      "properties": {
+        "type": { "const": "doc" },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/SeriesNode" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "series" },
+        "attrs": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "dates": { "type": "string" },
+            "refCode": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/SeriesOpsNode" },
+              { "$ref": "#/$defs/SeriesBodyNode" },
+              { "$ref": "#/$defs/SubseriesNode" },
+              { "$ref": "#/$defs/FileNode" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesOpsNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "seriesOps" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/SuggestionBlockNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesBodyNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "seriesBody" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/GenericNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "SubseriesNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "subseries" },
+        "attrs": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "dates": { "type": "string" },
+            "refCode": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/SubseriesNode" },
+              { "$ref": "#/$defs/FileNode" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "FileNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "file" },
+        "attrs": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "dates": { "type": "string" },
+            "refCode": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ItemNode" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ItemNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "item" },
+        "attrs": {
+          "type": "object",
+          "required": ["id", "itemType"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "itemType": { "enum": ["photograph", "document", "object"] }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            { "$ref": "#/$defs/ItemFieldsNode" },
+            { "$ref": "#/$defs/ItemBodyNode" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ItemFieldsNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "itemFields" },
+        "content": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/FieldNode" },
+              { "$ref": "#/$defs/FieldGroupNode" },
+              { "$ref": "#/$defs/SuggestionBlockNode" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ItemBodyNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "itemBody" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/GenericNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "FieldNode": {
+      "type": "object",
+      "required": ["type", "attrs"],
+      "properties": {
+        "type": { "const": "field" },
+        "attrs": {
+          "type": "object",
+          "required": ["id", "key", "valueType", "value"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "key": { "type": "string" },
+            "valueType": { "enum": ["text", "date", "number", "select", "boolean"] },
+            "value": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "FieldGroupNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "fieldGroup" },
+        "attrs": {
+          "type": "object",
+          "required": ["id", "groupKey"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "groupKey": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/FieldNode" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SuggestionDeleteNode": {
+      "type": "object",
+      "required": ["type", "attrs"],
+      "properties": {
+        "type": { "const": "suggestion_delete" },
+        "attrs": {
+          "type": "object",
+          "required": ["sid", "author", "createdAt", "text"],
+          "properties": {
+            "sid": { "$ref": "#/$defs/UUID" },
+            "author": { "type": "string" },
+            "createdAt": { "$ref": "#/$defs/EpochMs" },
+            "text": { "type": "string" },
+            "groupId": { "$ref": "#/$defs/UUID" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SuggestionBlockNode": {
+      "type": "object",
+      "required": ["type", "attrs"],
+      "properties": {
+        "type": { "const": "suggestion_block" },
+        "attrs": {
+          "type": "object",
+          "required": ["sid", "kind", "payload", "author", "createdAt"],
+          "properties": {
+            "sid": { "$ref": "#/$defs/UUID" },
+            "kind": {
+              "enum": [
+                "CREATE_ITEM",
+                "SET_FIELD",
+                "REORDER_SIBLING",
+                "MOVE_SUBTREE_CROSS_SERIES"
+              ]
+            },
+            "payload": { "type": "object" },
+            "author": { "type": "string" },
+            "createdAt": { "$ref": "#/$defs/EpochMs" },
+            "groupId": { "$ref": "#/$defs/UUID" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "type": "suggestion_block",
+  "attrs": {
+    "sid": "sug-010",
+    "kind": "CREATE_ITEM",
+    "author": "LLM",
+    "createdAt": 1700000001000,
+    "payload": {
+      "parentFileId": "file-b1-1",
+      "itemType": "photograph",
+      "initialFields": {
+        "subjects": ["Union Station"],
+        "date": "1931"
+      }
+    }
+  }
+}

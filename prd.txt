@@ -1,0 +1,2220 @@
+MASTER PRD (COMPREHENSIVE FINAL)
+Collaborative Archival Editor
+Per-Series Canonical Docs + Manifest
+In-Doc LLM Suggestions (Track Changes) + Accept/Reject by Anyone
+Cross-Series Moves via Proposals (No Tombstones)
+0. Executive Summary
+
+We are building a collaborative archival editor for hierarchical archival description (collection → series → subseries → file/box → item). Canonical content is stored per-series in separate Yjs documents for scalability. A separate manifest document stores series ordering and navigation metadata. The UI supports two views within a series: “Document view” (word-processor-like) and “CMS/Focus view” (targeted editing).
+
+LLMs do not write canonical content directly. They insert suggestions into the documents (track-changes style). Any collaborator can accept or reject suggestions. Canonical content changes only on accept. Cross-series moves are implemented as paired move proposals in source and target series docs.
+
+1. Goals, Non-Goals, Success Metrics
+1.1 Goals
+
+Support arbitrarily deep hierarchy within a series doc (subseries nesting unbounded).
+
+Leaf items contain:
+
+prose description with embedded images (itemBody)
+
+structured fields (itemFields) varying by item type.
+
+Provide two views per series:
+
+Document view: full content, minimal chrome.
+
+CMS/Focus view: collapse/expand hierarchy for targeted editing.
+
+Real-time collaboration:
+
+edits visible to all collaborators in the same series doc
+
+cursors in expanded content
+
+presence chips for focus areas.
+
+LLM assistance:
+
+inserts in-doc suggestions (red/green style)
+
+any user can accept/reject
+
+suggestions persist and are collaborative.
+
+Cross-series moves:
+
+LLM (and humans) can propose moving a subtree from one series doc to another.
+
+acceptance performs the actual move.
+
+Export:
+
+assemble full collection from manifest + series docs into a monolithic export artifact (JSON/HTML downstream).
+
+suggestions never export.
+
+1.2 Explicit Non-Goals (v1)
+
+Live monolithic editor for full collection.
+
+Global undo across series docs.
+
+Collection-wide search/index.
+
+Permission system beyond simple hooks (no enforcement).
+
+Arbitrary reparenting via drag-drop across branches (beyond explicit move proposal operations).
+
+1.3 Success Metrics
+
+Users can collaboratively edit within a series without noticeable typing lag for typical series sizes.
+
+Suggestions accepted/rejected converge deterministically across clients.
+
+Cross-series move proposals can be accepted without duplicates or data loss.
+
+Export artifact contains canonical content only and validates against schema.
+
+2. Architecture Overview
+2.1 Documents (Canonical Storage)
+
+Manifest Yjs doc per collection:
+
+stores series order and navigation metadata.
+
+Series Yjs docs:
+
+each series is its own collaborative doc containing its hierarchy and items.
+
+2.2 Provider / Rooms
+
+Document name conventions (authoritative):
+
+collection:<collectionId> (manifest)
+
+series:<collectionId>:<seriesId> (series)
+
+2.3 Connectivity
+
+When user is in a collection workspace:
+
+Always subscribe to manifest doc in background (so reorders are live).
+
+Subscribe to one series doc for editing.
+
+3. Data Model & ProseMirror Schema
+3.1 Manifest Document Schema
+doc
+doc.content = 'collectionManifest'
+
+collectionManifest
+collectionManifest
+  attrs:
+    collectionId: UUID
+    title: string
+    dates?: string
+  content:
+    collectionMeta seriesRef*
+
+collectionMeta
+collectionMeta
+  content: block*
+
+seriesRef (atom)
+seriesRef
+  atom: true
+  selectable: true
+  attrs:
+    seriesId: UUID
+    title: string
+    order: number
+    docName: string // must match series:<collectionId>:<seriesId>
+
+
+Manifest invariants
+
+seriesId unique.
+
+docName stable.
+
+Ordering defined by list order (primary) and may also be reflected in order attr (optional). If both exist, list order wins; order is derived.
+
+3.2 Series Document Schema (Canonical Content)
+Series doc doc
+doc.content = 'series'
+
+series
+series
+  group: 'block'
+  defining: true
+  isolating: true
+  attrs:
+    id: UUID
+    // title is cached only; manifest is authoritative for navigation display
+    title?: string
+    dates?: string
+    refCode?: string
+  content:
+    seriesBody? (subseries | file)*
+
+seriesBody
+seriesBody
+  group: 'block'
+  content: block*
+
+subseries
+subseries
+  group: 'block'
+  defining: true
+  isolating: true
+  attrs:
+    id: UUID
+    title?: string
+    dates?: string
+    refCode?: string
+  content:
+    (subseries | file)*
+
+file (represents box/file-level container)
+file
+  group: 'block'
+  defining: true
+  isolating: true
+  attrs:
+    id: UUID
+    title?: string
+    dates?: string
+    refCode?: string
+  content:
+    item*
+
+item
+item
+  group: 'block'
+  defining: true
+  isolating: true
+  attrs:
+    id: UUID
+    itemType: 'photograph' | 'document' | 'object'
+  content:
+    itemFields itemBody
+
+itemFields
+itemFields
+  isolating: true
+  content: (field | fieldGroup | suggestion_block)*  // allow suggestion chips colocated
+
+field (atom scalar)
+field
+  atom: true
+  selectable: false
+  attrs:
+    id: UUID
+    key: string
+    valueType: 'text' | 'date' | 'number' | 'select' | 'boolean'
+    value: string | number | boolean | null
+
+
+Repeatable scalars: multiple field nodes with same key.
+
+fieldGroup (repeatable row)
+fieldGroup
+  isolating: true
+  attrs:
+    id: UUID
+    groupKey: string
+  content:
+    field+
+
+itemBody
+itemBody
+  group: 'block'
+  content: block*  // paragraphs/headings/lists/images
+
+3.3 Item Type Field Definitions (Authoritative)
+Photograph
+
+subjects (repeatable text)
+
+objects (repeatable text)
+
+date (date)
+
+takenBy (text)
+
+materialType (select: print|negative|slide|digital|other)
+
+pii (boolean)
+
+Defaults:
+
+date=""
+
+takenBy=""
+
+materialType="other"
+
+pii=false
+
+Document
+
+transcription (text)
+
+date (date)
+
+subjectsMentioned (repeatable text)
+
+extent (text)
+
+Defaults:
+
+transcription=""
+
+date=""
+
+extent=""
+
+Object
+
+height (fieldGroup groupKey="height": value:number, unit:select mm|cm|m|in|ft) default unit cm
+
+weight (fieldGroup groupKey="weight": value:number, unit:select g|kg|oz|lb) default unit kg
+
+material (text)
+
+Defaults:
+
+one height group row (value=null, unit=cm)
+
+one weight group row (value=null, unit=kg)
+
+material=""
+
+4. Suggestion System (In-Doc Track Changes)
+4.1 Node/Mark Types
+suggestion_insert (mark)
+
+Applied to inserted text (green).
+
+attrs:
+  sid: UUID
+  author: string // "LLM" or userId
+  createdAt: number // epoch ms
+  groupId?: UUID
+
+suggestion_delete (inline atom node)
+
+Represents deleted text (red/strikethrough).
+
+inline: true
+atom: true
+attrs:
+  sid: UUID
+  author: string
+  createdAt: number
+  text: string
+  groupId?: UUID
+
+suggestion_block (block atom node)
+
+Represents structural proposals.
+
+group: 'block'
+atom: true
+attrs:
+  sid: UUID
+  kind: 'CREATE_ITEM' | 'SET_FIELD' | 'REORDER_SIBLING' | 'MOVE_SUBTREE_CROSS_SERIES'
+  payload: object
+  author: string
+  createdAt: number
+  groupId?: UUID
+
+4.2 Placement Rules for suggestion_block
+
+CREATE_ITEM: inserted inside the target file near the insertion point (default end).
+
+SET_FIELD: inserted inside itemFields adjacent to the affected field (or at end of itemFields if field absent).
+
+REORDER_SIBLING: inserted in the parent node container area (for v1: insert into parent’s first child area, or attach to a dedicated “ops area” node if you add one; simplest: put in itemFields for item reorder operations, or at top of file for file-level reorder proposals).
+
+MOVE_SUBTREE_CROSS_SERIES: inserted in both docs:
+
+in source: near subtree root (e.g., immediately before the subtree root node as a block sibling, or inside parent container at top with reference to subtreeRootId).
+
+in target: near target parent area, similar.
+
+Implementation simplification: Always store move proposal blocks in a dedicated “operations rail” UI panel that is backed by actual suggestion_block nodes stored at a stable location:
+
+For series doc, place all suggestion_block nodes inside seriesBody at top, after first paragraph, in a special container paragraph (not ideal), or define an explicit seriesOps node.
+Recommended: Add explicit seriesOps node (block) for proposals.
+
+4.3 Optional Schema Addition for Cleanliness (Recommended)
+
+Add seriesOps as the first child of series, containing suggestion blocks for series-level / structural ops.
+
+series content: seriesOps? seriesBody? (subseries|file)*
+seriesOps content: suggestion_block*
+
+
+This prevents mixing operational chips into prose/fields.
+
+5. Accept/Reject Semantics
+5.1 Accept/Reject Rules (Deterministic, Idempotent)
+
+Any user can accept or reject.
+
+Accept/reject must converge under concurrent action.
+
+Accept suggestion_insert mark
+
+Accept: remove mark, keep text.
+
+Reject: delete the marked text.
+
+Accept suggestion_delete node
+
+Accept: delete the node (deletion becomes real).
+
+Reject: replace the node with its stored text (plain text, no suggestion marks).
+
+Accept suggestion_block nodes
+
+Acceptance transforms canonical doc structure/fields and removes the suggestion node(s).
+
+Idempotency:
+
+Accept is a no-op if:
+
+suggestion artifact missing
+
+targets missing
+
+suggestion already applied (implicitly, because suggestion node removed)
+
+Reject is a no-op if suggestion already removed.
+
+5.2 Staleness Rules
+
+A suggestion is STALE if:
+
+referenced target ID cannot be found in the doc (or for cross-series, in either doc).
+
+required parent relationship invalid (e.g., reorder proposal where node and targetSibling do not share parent anymore).
+
+applying would violate schema.
+
+Stale suggestions:
+
+remain visible
+
+cannot be accepted
+
+can be rejected (removes it)
+
+UI indicates “Out of date”
+
+6. Cross-Series Move Proposal (Paired Suggestions)
+6.1 Proposal Payload (Authoritative)
+
+For MOVE_SUBTREE_CROSS_SERIES:
+
+payload: {
+  source: { seriesId: UUID, docName: string },
+  target: { seriesId: UUID, docName: string },
+  subtreeRootId: UUID,
+  targetParentId: UUID,
+  placement: { kind: 'append' } | { kind: 'before', siblingId: UUID } | { kind: 'after', siblingId: UUID }
+}
+
+6.2 Proposal Storage
+
+Create two suggestion_block nodes with same sid:
+
+one in source series doc
+
+one in target series doc
+
+6.3 Accept Flow (Atomicity Not Required; Safety Achieved by Proposals)
+
+On accept:
+
+Validate both docs reachable.
+
+Re-resolve subtree root in source doc by ID.
+
+Insert subtree into target doc at placement.
+
+Delete subtree from source doc.
+
+Remove both proposal blocks (by sid). If second removal fails, it’s okay; next sync should remove if present.
+
+If any step fails:
+
+do not remove proposal blocks
+
+mark the accepting action as failed (UI shows error)
+
+proposal remains for retry or reject
+
+Note: This is still multi-doc mutation on accept. The difference is that nothing irreversible happens until a human triggers accept, and failures leave a visible pending proposal.
+
+7. Focus Mode and Document View
+7.1 Local Plugin State (Per Series Doc)
+
+Focus plugin state is local only; not synced.
+
+type FocusState = {
+  mode: 'document' | 'focus'
+  focusedId: UUID | null
+  expandedIds: Set<UUID>
+  policy: 'focusPlusAncestors'
+}
+
+7.2 Collapse Policy
+
+In focus mode:
+
+Expanded if node.id is focusedId or ancestor of focusedId or in expandedIds.
+
+Otherwise collapsed.
+
+7.3 Compact Summary
+
+Items: show only OBJECT / PHOTOGRAPH / DOCUMENT
+
+Non-item nodes: title if present else uppercase type name.
+
+8. Presence and Awareness
+8.1 Per-Doc Awareness
+
+Awareness fields:
+
+{
+  user: { id, name, color },
+  focusId: UUID | null
+}
+
+8.2 UI Behavior
+
+In expanded content: show collaboration cursors.
+
+In collapsed nodes: show presence chips for users whose focusId == node.id.
+
+8.3 Collection-Level Presence (App-Level)
+
+Optional (v1.1):
+
+show “2 active” on series list from app-level presence, not Yjs.
+
+9. Reordering UX and Constraints
+9.1 Manifest: Reorder Series
+
+Drag/drop seriesRef list.
+
+Updates manifest ordering.
+
+9.2 Within Series Doc: Reorder Siblings (v1)
+
+Supported:
+
+reorder subseries among sibling subseries under same parent
+
+reorder files among sibling files under same parent
+
+reorder items among sibling items under same file
+
+Not supported v1:
+
+drag/drop reparenting into different parent
+
+arbitrary nesting changes
+
+Reorder operations can be:
+
+performed directly by user (canonical edit)
+
+proposed by LLM (REORDER_SIBLING suggestion_block)
+
+10. LLM Integration Requirements
+10.1 LLM Must Produce Suggestions Only
+
+LLM output is translated into creation of suggestion artifacts:
+
+insertions marked with suggestion_insert
+
+deletions represented by suggestion_delete
+
+structural proposals represented by suggestion_block
+
+10.2 Suggestion Scope Indicators
+
+Every suggestion UI shows:
+
+kind
+
+author (“LLM”)
+
+time
+
+affected node(s)
+
+for cross-series: source → target
+
+10.3 Suggestion Grouping
+
+LLM may assign groupId to a batch of suggestions (e.g., “expand series description”).
+UI supports “Accept all / Reject all in group”.
+
+11. Export Requirements
+11.1 Export Artifact (Monolithic)
+
+Export creates a single doc:
+
+doc
+  collection
+    series (from series docs in manifest order)
+
+11.2 Export Must Strip Suggestions
+
+Before export, remove:
+
+suggestion marks
+
+suggestion_delete nodes
+
+suggestion_block nodes
+
+any ops containers
+
+Export includes canonical content only (i.e., the result after accepting/rejecting suggestions; pending suggestions are ignored).
+
+12. Observability / Debug Mode
+12.1 Agent Action Log (Backend or Client Persisted)
+
+Log for each LLM request:
+
+opId
+
+docName(s)
+
+created suggestion ids (sid list)
+
+groupId
+
+result
+
+12.2 Debug Toggle (UI)
+
+When enabled:
+
+show sid/groupId inline
+
+show suggestion payload for suggestion_block
+
+show stale reason text
+
+13. State Diagrams
+13.1 Focus Mode State Diagram
+Document mode
+  └─ SET_MODE(focus) → Focus mode
+Focus mode:
+  SET_FOCUS(id) → recompute ancestors + expand
+  TOGGLE_EXPAND(id) → update expandedIds
+  SET_MODE(document) → return
+
+13.2 Suggestion Lifecycle
+Created (pending) → (Accept) → Applied + removed
+Created (pending) → (Reject) → Removed
+Created (pending) → (Targets changed) → Stale → (Reject) Removed
+Stale → (Regenerate) New suggestion(s)
+
+13.3 Cross-Series Move Proposal
+LLM creates paired proposals (sid shared)
+  → user accepts in either doc
+    → apply insert target + delete source
+      → remove proposals
+  → user rejects
+    → remove proposals
+  → error during accept
+    → proposals remain; retry or reject
+
+14. Testing Plan (Mandatory, PRD-Level)
+14.1 Test Types Required
+
+Unit tests: schema utilities, suggestion transforms, staleness checks
+
+Integration tests: ProseMirror + Yjs with two editors
+
+E2E tests: UI accept/reject flows, cross-series move proposal acceptance
+
+14.2 Core Invariants (Must Always Hold)
+
+Series doc has exactly one series root.
+
+All hierarchy nodes have stable UUID id attrs.
+
+Suggestions never alter canonical content until accepted.
+
+Export output contains no suggestion artifacts.
+
+Accept/reject is idempotent.
+
+14.3 Suggestion Inline Tests
+
+Insert mark:
+
+accept removes mark only
+
+reject removes text
+
+Delete node:
+
+accept removes delete node
+
+reject replaces with stored text
+
+Concurrent accept by two users: applied once, no corruption.
+
+14.4 Structural Suggestion Tests
+
+CREATE_ITEM accept inserts exactly one item with correct defaults.
+
+SET_FIELD accept updates field node or creates it if missing (per item type rules).
+
+REORDER_SIBLING accept reorders within same parent only; becomes stale otherwise.
+
+14.5 Cross-Series Move Tests
+
+Paired proposals appear in both source and target docs.
+
+Accept in source:
+
+subtree exists in target
+
+subtree removed from source
+
+proposals removed from both
+
+Accept concurrently in both:
+
+no duplication in target
+
+no crash
+
+Failure injection:
+
+simulated network failure to target doc: accept fails, proposals remain
+
+Staleness:
+
+subtree deleted before accept → proposal becomes stale and cannot be accepted.
+
+14.6 Collaboration Convergence Tests
+
+Two clients:
+
+one adds suggestions
+
+other accepts
+
+both converge to identical doc state
+
+15. Sprint Plan (Detailed)
+
+Assume 2-week sprint cadence. This plan is v1 delivery in ~2–3 sprints depending on team size.
+
+Sprint 1: Foundations (Docs + Collaboration + Schema + Basic Views)
+Goal
+
+Get manifest + series docs collaborating with base hierarchy rendering and editing.
+
+Tasks
+
+Project scaffolding
+
+Tiptap editor setup with Yjs collaboration
+
+Hocuspocus provider integration
+
+Manifest doc implementation
+
+schema nodes: collectionManifest, collectionMeta, seriesRef
+
+series list UI with live updates
+
+background manifest subscription in workspace
+
+Series doc schema
+
+nodes: series, seriesBody, subseries, file, item, itemFields, itemBody, field, fieldGroup
+
+UUID generation on insert for all node types
+
+Basic NodeViews
+
+hierarchy nodes render title, basic structure
+
+item renders itemType label + body
+
+Document view
+
+full rendering with basic editing
+
+Smoke collaboration
+
+two clients editing prose sees live updates
+
+cursor support in expanded content
+
+Acceptance Criteria
+
+Users can open a series doc and edit prose collaboratively.
+
+Manifest lists series and updates live on reorder.
+
+Sprint 2: Focus Mode + Structured Fields + Units
+Goal
+
+CMS/focus view for targeted editing + item type field UIs.
+
+Tasks
+
+Focus plugin
+
+FocusState (mode, focusedId, expandedIds)
+
+decorations/NodeView integration for collapsed vs expanded
+
+breadcrumb for focused path
+
+Compact rendering
+
+compact summary rules (items show type only)
+
+Field NodeViews
+
+scalar fields render inputs by valueType
+
+repeatable scalar lists (subjects, etc.)
+
+Measurement groups
+
+height/weight fieldGroup UI with number + unit dropdown
+
+units options as specified
+
+Item type schemas registry
+
+which fields show per type, ordering
+
+non-destructive type switching and default hydration
+
+Acceptance Criteria
+
+User can navigate hierarchy, expand/collapse, edit specific nodes.
+
+Object items show height/weight with unit dropdowns.
+
+Collaborative edits to fields sync.
+
+Sprint 3: Suggestion System v1 (Inline + Block) + Accept/Reject
+Goal
+
+Track-changes suggestions in-doc and deterministic accept/reject.
+
+Tasks
+
+Schema additions
+
+suggestion_insert mark
+
+suggestion_delete inline node
+
+suggestion_block block node
+
+(recommended) seriesOps container for suggestion blocks
+
+Rendering
+
+inline insert styling (green)
+
+delete node styling (red/strikethrough)
+
+block suggestion chip UI with accept/reject buttons
+
+Acceptance/rejection commands
+
+accept/reject inline insert
+
+accept/reject inline delete
+
+accept/reject CREATE_ITEM
+
+accept/reject SET_FIELD
+
+accept/reject REORDER_SIBLING
+
+Staleness detection
+
+mark stale, disable accept
+
+show stale reason
+
+GroupId support
+
+accept all / reject all UI for group
+
+Audit log hooks
+
+agentAction log skeleton and debug toggle
+
+Acceptance Criteria
+
+LLM-simulated suggestions appear and any user can accept/reject.
+
+Concurrent accept results in one application.
+
+Stale suggestions cannot be accepted.
+
+Sprint 4: Cross-Series Move Proposals + Export + E2E Tests
+Goal
+
+Safe cross-series reorg via proposals and export.
+
+Tasks
+
+Paired cross-series move proposals
+
+create suggestion_block in both docs (shared sid)
+
+render scope clearly
+
+Accept move
+
+insert into target, delete from source
+
+remove both proposals
+
+failure path keeps proposals
+
+Export pipeline
+
+read manifest order, fetch series docs
+
+strip suggestions
+
+output assembled PM JSON
+
+Testing
+
+unit tests for suggestion transforms
+
+integration tests with 2 editors + accept/reject
+
+e2e tests for cross-series move proposal accept
+
+Acceptance Criteria
+
+Cross-series move proposal can be accepted safely.
+
+Export contains no suggestions and correct series order.
+
+Automated tests cover invariants.
+
+16. Open Decisions (Must Be Fixed Before Implementation)
+
+These are the only remaining choices; pick defaults if agent must proceed:
+
+Where to store suggestion_block nodes
+Recommended: seriesOps container node at top of series.
+
+Do we allow suggestions inside itemBody only, or also seriesBody?
+Recommended: allow in both.
+
+Do we allow users to create suggestions manually (non-LLM)?
+v1: no UI, but possible later.
+
+If not specified, the coding agent should implement recommended defaults.
+
+17. Definition of Done (v1)
+
+Per-series docs + manifest operate collaboratively and scale.
+
+Focus mode works for arbitrarily deep hierarchies.
+
+Item types and fields render correctly (including units dropdowns).
+
+LLM suggestions persist in-doc and can be accepted/rejected by anyone.
+
+Cross-series moves are done via paired proposals and acceptance.
+
+Export assembles full collection and strips suggestions.
+
+Test suite enforces invariants and covers concurrency acceptance.
+
+If you want, I can also provide:
+
+a reference JSON example for (a) manifest doc, (b) series doc with nested subseries/file/item, and (c) each suggestion type, including paired move proposals.
+
+yes, please provide those in an addendum
+
+Below is the ADDENDUM: Reference JSON Artifacts.
+This is agent-facing, canonical, and intended to be used as fixtures, test inputs, and mental models during implementation.
+
+ADDENDUM A — Reference JSON Artifacts
+
+This addendum provides authoritative examples of:
+
+Collection Manifest document
+
+Series document with deep hierarchy
+
+Item field structures (all item types)
+
+Inline suggestions (insert/delete)
+
+Structural suggestions (suggestion_block)
+
+Cross-series move proposal (paired)
+
+All IDs are illustrative UUIDs.
+
+A1. Collection Manifest Document (Yjs / ProseMirror JSON)
+{
+  "type": "doc",
+  "content": [
+    {
+      "type": "collectionManifest",
+      "attrs": {
+        "collectionId": "col-001",
+        "title": "Railroad Company Records",
+        "dates": "1890–1950"
+      },
+      "content": [
+        {
+          "type": "collectionMeta",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                { "type": "text", "text": "Corporate records documenting railroad operations." }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "seriesRef",
+          "attrs": {
+            "seriesId": "series-a",
+            "title": "Administrative Records",
+            "order": 1,
+            "docName": "series:col-001:series-a"
+          }
+        },
+        {
+          "type": "seriesRef",
+          "attrs": {
+            "seriesId": "series-b",
+            "title": "Photographic Materials",
+            "order": 2,
+            "docName": "series:col-001:series-b"
+          }
+        }
+      ]
+    }
+  ]
+}
+
+A2. Series Document (Deep Hierarchy)
+{
+  "type": "doc",
+  "content": [
+    {
+      "type": "series",
+      "attrs": {
+        "id": "series-b",
+        "title": "Photographic Materials"
+      },
+      "content": [
+        {
+          "type": "seriesOps",
+          "content": []
+        },
+        {
+          "type": "seriesBody",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                { "type": "text", "text": "Photographs documenting railroad infrastructure and staff." }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "subseries",
+          "attrs": {
+            "id": "subseries-b1",
+            "title": "Station Photographs"
+          },
+          "content": [
+            {
+              "type": "file",
+              "attrs": {
+                "id": "file-b1-1",
+                "title": "Union Station, 1920s"
+              },
+              "content": [
+                {
+                  "type": "item",
+                  "attrs": {
+                    "id": "item-photo-001",
+                    "itemType": "photograph"
+                  },
+                  "content": [
+                    {
+                      "type": "itemFields",
+                      "content": [
+                        {
+                          "type": "field",
+                          "attrs": {
+                            "id": "f1",
+                            "key": "subjects",
+                            "valueType": "text",
+                            "value": "Union Station"
+                          }
+                        },
+                        {
+                          "type": "field",
+                          "attrs": {
+                            "id": "f2",
+                            "key": "date",
+                            "valueType": "date",
+                            "value": "1924"
+                          }
+                        },
+                        {
+                          "type": "field",
+                          "attrs": {
+                            "id": "f3",
+                            "key": "pii",
+                            "valueType": "boolean",
+                            "value": false
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "itemBody",
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            { "type": "text", "text": "View of Union Station from the south entrance." }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+A3. Item Field Examples by Type
+Photograph (full)
+{
+  "type": "itemFields",
+  "content": [
+    { "type": "field", "attrs": { "id": "p1", "key": "subjects", "valueType": "text", "value": "Railway workers" } },
+    { "type": "field", "attrs": { "id": "p2", "key": "objects", "valueType": "text", "value": "Steam locomotive" } },
+    { "type": "field", "attrs": { "id": "p3", "key": "date", "valueType": "date", "value": "1910" } },
+    { "type": "field", "attrs": { "id": "p4", "key": "takenBy", "valueType": "text", "value": "Unknown" } },
+    { "type": "field", "attrs": { "id": "p5", "key": "materialType", "valueType": "select", "value": "print" } },
+    { "type": "field", "attrs": { "id": "p6", "key": "pii", "valueType": "boolean", "value": false } }
+  ]
+}
+
+Object (height + weight)
+{
+  "type": "itemFields",
+  "content": [
+    {
+      "type": "fieldGroup",
+      "attrs": { "id": "g1", "groupKey": "height" },
+      "content": [
+        { "type": "field", "attrs": { "id": "h1", "key": "value", "valueType": "number", "value": 45 } },
+        { "type": "field", "attrs": { "id": "h2", "key": "unit", "valueType": "select", "value": "cm" } }
+      ]
+    },
+    {
+      "type": "fieldGroup",
+      "attrs": { "id": "g2", "groupKey": "weight" },
+      "content": [
+        { "type": "field", "attrs": { "id": "w1", "key": "value", "valueType": "number", "value": 3.2 } },
+        { "type": "field", "attrs": { "id": "w2", "key": "unit", "valueType": "select", "value": "kg" } }
+      ]
+    },
+    {
+      "type": "field",
+      "attrs": { "id": "m1", "key": "material", "valueType": "text", "value": "Steel" }
+    }
+  ]
+}
+
+A4. Inline Suggestion Examples
+Inline Insert (suggestion_insert)
+{
+  "type": "paragraph",
+  "content": [
+    { "type": "text", "text": "This series includes " },
+    {
+      "type": "text",
+      "text": "extensive documentation",
+      "marks": [
+        {
+          "type": "suggestion_insert",
+          "attrs": {
+            "sid": "sug-001",
+            "author": "LLM",
+            "createdAt": 1700000000000
+          }
+        }
+      ]
+    }
+  ]
+}
+
+Inline Delete (suggestion_delete)
+{
+  "type": "paragraph",
+  "content": [
+    { "type": "text", "text": "Photographs of " },
+    {
+      "type": "suggestion_delete",
+      "attrs": {
+        "sid": "sug-002",
+        "author": "LLM",
+        "createdAt": 1700000000100,
+        "text": "damaged equipment"
+      }
+    }
+  ]
+}
+
+A5. Structural Suggestion Blocks
+CREATE_ITEM
+{
+  "type": "suggestion_block",
+  "attrs": {
+    "sid": "sug-010",
+    "kind": "CREATE_ITEM",
+    "author": "LLM",
+    "createdAt": 1700000001000,
+    "payload": {
+      "parentFileId": "file-b1-1",
+      "itemType": "photograph",
+      "initialFields": {
+        "subjects": ["Union Station"],
+        "date": "1931"
+      }
+    }
+  }
+}
+
+REORDER_SIBLING
+{
+  "type": "suggestion_block",
+  "attrs": {
+    "sid": "sug-011",
+    "kind": "REORDER_SIBLING",
+    "author": "LLM",
+    "createdAt": 1700000001100,
+    "payload": {
+      "parentId": "file-b1-1",
+      "nodeId": "item-photo-002",
+      "targetSiblingId": "item-photo-001",
+      "placement": "before"
+    }
+  }
+}
+
+A6. Cross-Series Move Proposal (Paired)
+Source Series (series-a)
+{
+  "type": "suggestion_block",
+  "attrs": {
+    "sid": "sug-move-001",
+    "kind": "MOVE_SUBTREE_CROSS_SERIES",
+    "author": "LLM",
+    "createdAt": 1700000002000,
+    "payload": {
+      "source": { "seriesId": "series-a", "docName": "series:col-001:series-a" },
+      "target": { "seriesId": "series-b", "docName": "series:col-001:series-b" },
+      "subtreeRootId": "file-a3",
+      "targetParentId": "subseries-b1",
+      "placement": { "kind": "append" }
+    }
+  }
+}
+
+Target Series (series-b)
+{
+  "type": "suggestion_block",
+  "attrs": {
+    "sid": "sug-move-001",
+    "kind": "MOVE_SUBTREE_CROSS_SERIES",
+    "author": "LLM",
+    "createdAt": 1700000002000,
+    "payload": {
+      "source": { "seriesId": "series-a", "docName": "series:col-001:series-a" },
+      "target": { "seriesId": "series-b", "docName": "series:col-001:series-b" },
+      "subtreeRootId": "file-a3",
+      "targetParentId": "subseries-b1",
+      "placement": { "kind": "append" }
+    }
+  }
+}
+
+
+Accepting either proposal triggers the move and removes both blocks.
+
+A7. Export Output (Suggestions Stripped)
+{
+  "type": "doc",
+  "content": [
+    {
+      "type": "collection",
+      "attrs": {
+        "collectionId": "col-001",
+        "title": "Railroad Company Records"
+      },
+      "content": [
+        {
+          "type": "series",
+          "attrs": { "id": "series-b" },
+          "content": [
+            { "type": "seriesBody", "content": [ /* canonical text only */ ] },
+            /* hierarchy continues, no suggestion_* nodes or marks */
+          ]
+        }
+      ]
+    }
+  ]
+}
+
+
+
+
+ADDENDUM B — TypeScript Types and JSON Schema
+B1) TypeScript types (authoritative)
+
+Use these types as the contract between:
+
+persistence
+
+exporter
+
+test fixtures
+
+suggestion accept/reject transforms
+
+// -----------------------------
+// Shared primitives
+// -----------------------------
+export type UUID = string;
+export type EpochMs = number;
+
+export type PMDoc = {
+  type: "doc";
+  content: PMNode[];
+};
+
+export type PMNode = {
+  type: string;
+  attrs?: Record<string, any>;
+  content?: PMNode[];
+  marks?: PMMark[];
+  text?: string;
+};
+
+export type PMMark = {
+  type: string;
+  attrs?: Record<string, any>;
+};
+
+// Utility for narrowing
+export type NodeType =
+  | "collectionManifest"
+  | "collectionMeta"
+  | "seriesRef"
+  | "series"
+  | "seriesOps"
+  | "seriesBody"
+  | "subseries"
+  | "file"
+  | "item"
+  | "itemFields"
+  | "itemBody"
+  | "field"
+  | "fieldGroup"
+  | "suggestion_delete"
+  | "suggestion_block"
+  | "paragraph"
+  | "text"
+  | "heading"
+  | "bulletList"
+  | "orderedList"
+  | "listItem"
+  | "image";
+
+// -----------------------------
+// Manifest doc
+// -----------------------------
+export type CollectionManifestDoc = {
+  type: "doc";
+  content: [CollectionManifestNode];
+};
+
+export type CollectionManifestNode = {
+  type: "collectionManifest";
+  attrs: {
+    collectionId: UUID;
+    title: string;
+    dates?: string;
+  };
+  content: [CollectionMetaNode, ...SeriesRefNode[]];
+};
+
+export type CollectionMetaNode = {
+  type: "collectionMeta";
+  content?: PMNode[]; // block*
+};
+
+export type SeriesRefNode = {
+  type: "seriesRef";
+  attrs: {
+    seriesId: UUID;
+    title: string;
+    order: number;
+    docName: string; // series:<collectionId>:<seriesId>
+  };
+};
+
+// -----------------------------
+// Series doc
+// -----------------------------
+export type SeriesDoc = {
+  type: "doc";
+  content: [SeriesNode];
+};
+
+export type SeriesNode = {
+  type: "series";
+  attrs: {
+    id: UUID;
+    title?: string; // cached only; manifest is authoritative
+    dates?: string;
+    refCode?: string;
+  };
+  content: PMNode[]; // seriesOps? seriesBody? (subseries|file)*
+};
+
+export type SeriesOpsNode = {
+  type: "seriesOps";
+  content?: SuggestionBlockNode[];
+};
+
+export type SeriesBodyNode = {
+  type: "seriesBody";
+  content?: PMNode[]; // block*
+};
+
+export type SubseriesNode = {
+  type: "subseries";
+  attrs: {
+    id: UUID;
+    title?: string;
+    dates?: string;
+    refCode?: string;
+  };
+  content: Array<SubseriesNode | FileNode>;
+};
+
+export type FileNode = {
+  type: "file";
+  attrs: {
+    id: UUID;
+    title?: string;
+    dates?: string;
+    refCode?: string;
+  };
+  content: ItemNode[];
+};
+
+export type ItemType = "photograph" | "document" | "object";
+
+export type ItemNode = {
+  type: "item";
+  attrs: {
+    id: UUID;
+    itemType: ItemType;
+  };
+  content: [ItemFieldsNode, ItemBodyNode];
+};
+
+export type ItemFieldsNode = {
+  type: "itemFields";
+  content?: Array<FieldNode | FieldGroupNode | SuggestionBlockNode>;
+};
+
+export type ItemBodyNode = {
+  type: "itemBody";
+  content?: PMNode[]; // block*
+};
+
+// -----------------------------
+// Fields
+// -----------------------------
+export type ValueType = "text" | "date" | "number" | "select" | "boolean";
+
+export type FieldNode = {
+  type: "field";
+  attrs: {
+    id: UUID;
+    key: string;
+    valueType: ValueType;
+    value: string | number | boolean | null;
+  };
+};
+
+export type FieldGroupNode = {
+  type: "fieldGroup";
+  attrs: {
+    id: UUID;
+    groupKey: string; // e.g. height, weight
+  };
+  content: FieldNode[]; // must include value + unit fields for measurement groups
+};
+
+// -----------------------------
+// Suggestions (in-doc, collaborative)
+// -----------------------------
+export type SuggestionInsertMark = {
+  type: "suggestion_insert";
+  attrs: {
+    sid: UUID;
+    author: string; // "LLM" or userId
+    createdAt: EpochMs;
+    groupId?: UUID;
+  };
+};
+
+export type SuggestionDeleteNode = {
+  type: "suggestion_delete";
+  attrs: {
+    sid: UUID;
+    author: string;
+    createdAt: EpochMs;
+    text: string;
+    groupId?: UUID;
+  };
+};
+
+export type SuggestionKind =
+  | "CREATE_ITEM"
+  | "SET_FIELD"
+  | "REORDER_SIBLING"
+  | "MOVE_SUBTREE_CROSS_SERIES";
+
+export type SuggestionBlockNode = {
+  type: "suggestion_block";
+  attrs: {
+    sid: UUID;
+    kind: SuggestionKind;
+    payload: CreateItemPayload | SetFieldPayload | ReorderSiblingPayload | MoveCrossSeriesPayload;
+    author: string;
+    createdAt: EpochMs;
+    groupId?: UUID;
+  };
+};
+
+// Payloads
+export type CreateItemPayload = {
+  parentFileId: UUID;
+  itemType: ItemType;
+  // optional initial field values; executor hydrates defaults and repeatables
+  initialFields?: Record<string, any>;
+  // optional initial prose text
+  initialBodyText?: string;
+  // optional positioning relative to sibling
+  insert?: { kind: "append" } | { kind: "before" | "after"; siblingId: UUID };
+};
+
+export type SetFieldPayload = {
+  itemId: UUID;
+  key: string;
+  valueType: ValueType;
+  value: string | number | boolean | null;
+};
+
+export type ReorderSiblingPayload = {
+  parentId: UUID;
+  nodeId: UUID;
+  targetSiblingId: UUID;
+  placement: "before" | "after";
+};
+
+export type MoveCrossSeriesPayload = {
+  source: { seriesId: UUID; docName: string };
+  target: { seriesId: UUID; docName: string };
+  subtreeRootId: UUID;
+  targetParentId: UUID;
+  placement:
+    | { kind: "append" }
+    | { kind: "before"; siblingId: UUID }
+    | { kind: "after"; siblingId: UUID };
+};
+
+// -----------------------------
+// Agent action log (observability)
+// -----------------------------
+export type AgentActionLogRecord = {
+  opId: UUID;
+  userId: string;
+  createdAt: EpochMs;
+  docNames: string[]; // one or two series docs
+  suggestionIds: UUID[];
+  groupId?: UUID;
+  promptSummary?: string;
+  result: "ok" | "failed";
+  errorMessage?: string;
+};
+
+B2) JSON Schema (Draft 2020-12, minimal but strict where it matters)
+
+This schema validates:
+
+manifest doc shape
+
+series doc shape
+
+suggestion node/mark shape (as JSON, not ProseMirror runtime)
+
+It intentionally does not attempt to validate every ProseMirror “block*” possibility. It validates the nodes you control.
+
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/archival-editor.schema.json",
+  "title": "Archival Editor ProseMirror JSON",
+  "oneOf": [
+    { "$ref": "#/$defs/CollectionManifestDoc" },
+    { "$ref": "#/$defs/SeriesDoc" }
+  ],
+  "$defs": {
+    "UUID": { "type": "string", "minLength": 1 },
+    "EpochMs": { "type": "integer", "minimum": 0 },
+
+    "PMText": {
+      "type": "object",
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "text" },
+        "text": { "type": "string" },
+        "marks": { "type": "array", "items": { "$ref": "#/$defs/PMMark" } }
+      },
+      "additionalProperties": false
+    },
+
+    "PMMark": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string" },
+        "attrs": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+
+    "GenericBlockNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string" },
+        "attrs": { "type": "object" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/GenericNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "GenericNode": {
+      "oneOf": [
+        { "$ref": "#/$defs/PMText" },
+        { "$ref": "#/$defs/SuggestionDeleteNode" },
+        { "$ref": "#/$defs/SuggestionBlockNode" },
+        { "$ref": "#/$defs/FieldNode" },
+        { "$ref": "#/$defs/FieldGroupNode" },
+        { "$ref": "#/$defs/GenericBlockNode" }
+      ]
+    },
+
+    "CollectionManifestDoc": {
+      "type": "object",
+      "required": ["type", "content"],
+      "properties": {
+        "type": { "const": "doc" },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/CollectionManifestNode" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "CollectionManifestNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "collectionManifest" },
+        "attrs": {
+          "type": "object",
+          "required": ["collectionId", "title"],
+          "properties": {
+            "collectionId": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "dates": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/CollectionMetaNode" },
+              { "$ref": "#/$defs/SeriesRefNode" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "CollectionMetaNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "collectionMeta" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/GenericNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesRefNode": {
+      "type": "object",
+      "required": ["type", "attrs"],
+      "properties": {
+        "type": { "const": "seriesRef" },
+        "attrs": {
+          "type": "object",
+          "required": ["seriesId", "title", "order", "docName"],
+          "properties": {
+            "seriesId": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "order": { "type": "number" },
+            "docName": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesDoc": {
+      "type": "object",
+      "required": ["type", "content"],
+      "properties": {
+        "type": { "const": "doc" },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/SeriesNode" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "series" },
+        "attrs": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "dates": { "type": "string" },
+            "refCode": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/SeriesOpsNode" },
+              { "$ref": "#/$defs/SeriesBodyNode" },
+              { "$ref": "#/$defs/SubseriesNode" },
+              { "$ref": "#/$defs/FileNode" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesOpsNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "seriesOps" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/SuggestionBlockNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "SeriesBodyNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "seriesBody" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/GenericNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "SubseriesNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "subseries" },
+        "attrs": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "dates": { "type": "string" },
+            "refCode": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "items": { "oneOf": [{ "$ref": "#/$defs/SubseriesNode" }, { "$ref": "#/$defs/FileNode" }] }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "FileNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "file" },
+        "attrs": {
+          "type": "object",
+          "required": ["id"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "title": { "type": "string" },
+            "dates": { "type": "string" },
+            "refCode": { "type": "string" }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ItemNode" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ItemNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "item" },
+        "attrs": {
+          "type": "object",
+          "required": ["id", "itemType"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "itemType": { "enum": ["photograph", "document", "object"] }
+          },
+          "additionalProperties": true
+        },
+        "content": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [{ "$ref": "#/$defs/ItemFieldsNode" }, { "$ref": "#/$defs/ItemBodyNode" }]
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ItemFieldsNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "itemFields" },
+        "content": {
+          "type": "array",
+          "items": {
+            "oneOf": [{ "$ref": "#/$defs/FieldNode" }, { "$ref": "#/$defs/FieldGroupNode" }, { "$ref": "#/$defs/SuggestionBlockNode" }]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ItemBodyNode": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "itemBody" },
+        "content": { "type": "array", "items": { "$ref": "#/$defs/GenericNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "FieldNode": {
+      "type": "object",
+      "required": ["type", "attrs"],
+      "properties": {
+        "type": { "const": "field" },
+        "attrs": {
+          "type": "object",
+          "required": ["id", "key", "valueType", "value"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "key": { "type": "string" },
+            "valueType": { "enum": ["text", "date", "number", "select", "boolean"] },
+            "value": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "FieldGroupNode": {
+      "type": "object",
+      "required": ["type", "attrs", "content"],
+      "properties": {
+        "type": { "const": "fieldGroup" },
+        "attrs": {
+          "type": "object",
+          "required": ["id", "groupKey"],
+          "properties": {
+            "id": { "$ref": "#/$defs/UUID" },
+            "groupKey": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "content": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/FieldNode" } }
+      },
+      "additionalProperties": false
+    },
+
+    "SuggestionDeleteNode": {
+      "type": "object",
+      "required": ["type", "attrs"],
+      "properties": {
+        "type": { "const": "suggestion_delete" },
+        "attrs": {
+          "type": "object",
+          "required": ["sid", "author", "createdAt", "text"],
+          "properties": {
+            "sid": { "$ref": "#/$defs/UUID" },
+            "author": { "type": "string" },
+            "createdAt": { "$ref": "#/$defs/EpochMs" },
+            "text": { "type": "string" },
+            "groupId": { "$ref": "#/$defs/UUID" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SuggestionBlockNode": {
+      "type": "object",
+      "required": ["type", "attrs"],
+      "properties": {
+        "type": { "const": "suggestion_block" },
+        "attrs": {
+          "type": "object",
+          "required": ["sid", "kind", "payload", "author", "createdAt"],
+          "properties": {
+            "sid": { "$ref": "#/$defs/UUID" },
+            "kind": { "enum": ["CREATE_ITEM", "SET_FIELD", "REORDER_SIBLING", "MOVE_SUBTREE_CROSS_SERIES"] },
+            "payload": { "type": "object" },
+            "author": { "type": "string" },
+            "createdAt": { "$ref": "#/$defs/EpochMs" },
+            "groupId": { "$ref": "#/$defs/UUID" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
+
+ADDENDUM C — Golden-path walkthroughs
+C1) LLM proposes inline edits to a series description, user accepts all
+
+Starting state
+
+User is in series:col-001:series-b
+
+seriesBody contains one paragraph.
+
+User instruction
+
+“Add more detail about this series: mention staff, infrastructure, and dates.”
+
+System steps
+
+UI sends the prompt + current seriesBody text to LLM.
+
+LLM returns a plan: insert phrases and remove one vague clause.
+
+App applies changes as suggestions, not canonical edits:
+
+Insertions: wrap inserted text in suggestion_insert mark with sid/groupId.
+
+Deletions: replace deleted text with a suggestion_delete inline node with stored text.
+
+UI renders green insertions + red deletions inline.
+
+UI shows group controls: “Accept all (groupId=G)” / “Reject all”.
+
+Accept all
+6. User clicks “Accept all.”
+7. For each suggestion in group:
+
+suggestion_insert: remove the mark only.
+
+suggestion_delete: remove the node (text stays deleted).
+
+Group controls disappear; canonical text now includes the accepted changes.
+
+Correctness criteria
+
+No suggestion artifacts remain for that group.
+
+All collaborators converge on the same canonical content.
+
+C2) LLM proposes creating a new item in a file, user accepts
+
+Starting state
+
+Within file-b1-1, there is one item.
+
+User instruction
+
+“Add a new photograph item for a 1931 exterior shot of Union Station.”
+
+System steps
+
+LLM produces a suggestion_block:
+
+kind = CREATE_ITEM
+
+payload includes parentFileId, itemType, and initial fields like date, subjects.
+
+App inserts the suggestion_block into seriesOps (or adjacent to the file per your implementation choice).
+
+UI shows the suggestion card:
+
+“Create new PHOTOGRAPH in Union Station, 1920s”
+
+Accept / Reject
+
+Accept
+4. User clicks Accept.
+5. Accept handler:
+
+Resolves parentFileId to current node/position.
+
+Creates a new item node with:
+
+new UUID id
+
+itemType photograph
+
+default required fields hydrated (pii/materialType etc.)
+
+initial fields merged (e.g., date=1931, subjects includes Union Station)
+
+Inserts item at end of file (or per payload.insert).
+
+Removes suggestion_block.
+
+Correctness criteria
+
+Exactly one item created.
+
+Defaults present per type schema.
+
+Suggestion removed.
+
+C3) LLM proposes reordering two sibling items, user accepts
+
+User instruction
+
+“Move item-photo-002 above item-photo-001.”
+
+Steps
+
+LLM emits a REORDER_SIBLING suggestion_block with:
+
+parentId = file-b1-1
+
+nodeId = item-photo-002
+
+targetSiblingId = item-photo-001
+
+placement = before
+
+UI shows a reorder proposal chip/card.
+
+On accept:
+
+Resolve all ids to current positions
+
+Verify nodeId and targetSiblingId share the same parent (else stale)
+
+Apply move transaction
+
+Remove suggestion block
+
+Correctness criteria
+
+Order changes once even if two users accept concurrently.
+
+If targets changed, suggestion becomes stale (cannot accept).
+
+C4) Cross-series move proposal (paired), accept in target series
+
+Starting state
+
+Source: series:col-001:series-a contains subtree file-a3
+
+Target: series:col-001:series-b should receive it under subseries-b1
+
+User instruction
+
+“Move file-a3 into Station Photographs.”
+
+Proposal generation
+
+LLM generates MOVE_SUBTREE_CROSS_SERIES with shared sid=sug-move-001.
+
+App inserts a suggestion_block with that sid into:
+
+source series doc (seriesOps)
+
+target series doc (seriesOps)
+
+Both UIs show “Proposed move from Series A → Series B”.
+
+Accept in target series
+4. A user in Series B clicks Accept on the move suggestion.
+5. Accept handler performs:
+
+Resolve subtreeRootId file-a3 in source doc. If missing ⇒ stale.
+
+Clone the subtree JSON.
+
+Insert clone into target under targetParentId with placement.
+
+Delete subtree from source doc.
+
+Remove the move suggestion blocks from both docs (best effort; removal is idempotent).
+
+Failure behavior
+
+If insertion fails, do not delete from source; keep proposals.
+
+If deletion fails after insert, keep proposals; retry later (user can re-accept).
+
+Correctness criteria
+
+After successful accept:
+
+subtree exists in target exactly once
+
+subtree absent from source
+
+both proposal blocks removed
+
+Concurrent accept from both docs does not duplicate subtree:
+
+On accept, check “does target already contain subtreeRootId?” If you preserve IDs, this is a straightforward existence check; otherwise check a move marker field in payload.
+
+C5) Export golden path
+
+Export request
+
+User requests export of collection.
+
+Steps
+
+Read manifest doc; sort seriesRefs by list order.
+
+For each seriesRef:
+
+Fetch series doc JSON
+
+Strip all suggestion artifacts:
+
+remove suggestion_block nodes
+
+remove suggestion_delete nodes (they represent unaccepted deletions)
+
+remove suggestion_insert marks
+
+Assemble collection export doc:
+
+collection.content = [series1, series2, ...]
+
+Output ProseMirror JSON (and optionally HTML/PDF downstream).
+
+Correctness criteria
+
+Export includes canonical text only (no pending suggestions).
+
+Series order matches manifest.
+
+Export validates against schema.
+
+
+
+
+

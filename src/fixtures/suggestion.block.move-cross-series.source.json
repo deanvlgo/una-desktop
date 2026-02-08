@@ -1,0 +1,24 @@
+{
+  "type": "suggestion_block",
+  "attrs": {
+    "sid": "sug-move-001",
+    "kind": "MOVE_SUBTREE_CROSS_SERIES",
+    "author": "LLM",
+    "createdAt": 1700000002000,
+    "payload": {
+      "source": {
+        "seriesId": "series-a",
+        "docName": "series:col-001:series-a"
+      },
+      "target": {
+        "seriesId": "series-b",
+        "docName": "series:col-001:series-b"
+      },
+      "subtreeRootId": "file-a3",
+      "targetParentId": "subseries-b1",
+      "placement": {
+        "kind": "append"
+      }
+    }
+  }
+}

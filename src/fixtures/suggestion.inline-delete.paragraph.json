@@ -1,0 +1,18 @@
+{
+  "type": "paragraph",
+  "content": [
+    {
+      "type": "text",
+      "text": "Photographs of "
+    },
+    {
+      "type": "suggestion_delete",
+      "attrs": {
+        "sid": "sug-002",
+        "author": "LLM",
+        "createdAt": 1700000000100,
+        "text": "damaged equipment"
+      }
+    }
+  ]
+}

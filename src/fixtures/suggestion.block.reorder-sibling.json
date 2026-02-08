@@ -1,0 +1,15 @@
+{
+  "type": "suggestion_block",
+  "attrs": {
+    "sid": "sug-011",
+    "kind": "REORDER_SIBLING",
+    "author": "LLM",
+    "createdAt": 1700000001100,
+    "payload": {
+      "parentId": "file-b1-1",
+      "nodeId": "item-photo-002",
+      "targetSiblingId": "item-photo-001",
+      "placement": "before"
+    }
+  }
+}

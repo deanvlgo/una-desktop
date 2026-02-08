@@ -1,0 +1,68 @@
+{
+  "type": "itemFields",
+  "content": [
+    {
+      "type": "fieldGroup",
+      "attrs": {
+        "id": "g1",
+        "groupKey": "height"
+      },
+      "content": [
+        {
+          "type": "field",
+          "attrs": {
+            "id": "h1",
+            "key": "value",
+            "valueType": "number",
+            "value": 45
+          }
+        },
+        {
+          "type": "field",
+          "attrs": {
+            "id": "h2",
+            "key": "unit",
+            "valueType": "select",
+            "value": "cm"
+          }
+        }
+      ]
+    },
+    {
+      "type": "fieldGroup",
+      "attrs": {
+        "id": "g2",
+        "groupKey": "weight"
+      },
+      "content": [
+        {
+          "type": "field",
+          "attrs": {
+            "id": "w1",
+            "key": "value",
+            "valueType": "number",
+            "value": 3.2
+          }
+        },
+        {
+          "type": "field",
+          "attrs": {
+            "id": "w2",
+            "key": "unit",
+            "valueType": "select",
+            "value": "kg"
+          }
+        }
+      ]
+    },
+    {
+      "type": "field",
+      "attrs": {
+        "id": "m1",
+        "key": "material",
+        "valueType": "text",
+        "value": "Steel"
+      }
+    }
+  ]
+}

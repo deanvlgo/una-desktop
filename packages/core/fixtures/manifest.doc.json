@@ -1,0 +1,47 @@
+{
+  "type": "doc",
+  "content": [
+    {
+      "type": "collectionManifest",
+      "attrs": {
+        "collectionId": "col-001",
+        "title": "Railroad Company Records",
+        "dates": "1890-1950"
+      },
+      "content": [
+        {
+          "type": "collectionMeta",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Corporate records documenting railroad operations."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "seriesRef",
+          "attrs": {
+            "seriesId": "series-a",
+            "title": "Administrative Records",
+            "order": 1,
+            "docName": "series:col-001:series-a"
+          }
+        },
+        {
+          "type": "seriesRef",
+          "attrs": {
+            "seriesId": "series-b",
+            "title": "Photographic Materials",
+            "order": 2,
+            "docName": "series:col-001:series-b"
+          }
+        }
+      ]
+    }
+  ]
+}

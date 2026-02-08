@@ -1,0 +1,23 @@
+{
+  "type": "paragraph",
+  "content": [
+    {
+      "type": "text",
+      "text": "This series includes "
+    },
+    {
+      "type": "text",
+      "text": "extensive documentation",
+      "marks": [
+        {
+          "type": "suggestion_insert",
+          "attrs": {
+            "sid": "sug-001",
+            "author": "LLM",
+            "createdAt": 1700000000000
+          }
+        }
+      ]
+    }
+  ]
+}

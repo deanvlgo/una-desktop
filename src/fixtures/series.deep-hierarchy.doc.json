@@ -1,0 +1,105 @@
+{
+  "type": "doc",
+  "content": [
+    {
+      "type": "series",
+      "attrs": {
+        "id": "series-b",
+        "title": "Photographic Materials"
+      },
+      "content": [
+        {
+          "type": "seriesOps",
+          "content": []
+        },
+        {
+          "type": "seriesBody",
+          "content": [
+            {
+              "type": "paragraph",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Photographs documenting railroad infrastructure and staff."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "subseries",
+          "attrs": {
+            "id": "subseries-b1",
+            "title": "Station Photographs"
+          },
+          "content": [
+            {
+              "type": "file",
+              "attrs": {
+                "id": "file-b1-1",
+                "title": "Union Station, 1920s"
+              },
+              "content": [
+                {
+                  "type": "item",
+                  "attrs": {
+                    "id": "item-photo-001",
+                    "itemType": "photograph"
+                  },
+                  "content": [
+                    {
+                      "type": "itemFields",
+                      "content": [
+                        {
+                          "type": "field",
+                          "attrs": {
+                            "id": "f1",
+                            "key": "subjects",
+                            "valueType": "text",
+                            "value": "Union Station"
+                          }
+                        },
+                        {
+                          "type": "field",
+                          "attrs": {
+                            "id": "f2",
+                            "key": "date",
+                            "valueType": "date",
+                            "value": "1924"
+                          }
+                        },
+                        {
+                          "type": "field",
+                          "attrs": {
+                            "id": "f3",
+                            "key": "pii",
+                            "valueType": "boolean",
+                            "value": false
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "itemBody",
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "View of Union Station from the south entrance."
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

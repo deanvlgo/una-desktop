@@ -1,0 +1,36 @@
+{
+  "type": "doc",
+  "content": [
+    {
+      "type": "collection",
+      "attrs": {
+        "collectionId": "col-001",
+        "title": "Railroad Company Records"
+      },
+      "content": [
+        {
+          "type": "series",
+          "attrs": {
+            "id": "series-b"
+          },
+          "content": [
+            {
+              "type": "seriesBody",
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Photographs documenting railroad infrastructure and staff."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

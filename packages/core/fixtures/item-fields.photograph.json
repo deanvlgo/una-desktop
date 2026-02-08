@@ -1,0 +1,59 @@
+{
+  "type": "itemFields",
+  "content": [
+    {
+      "type": "field",
+      "attrs": {
+        "id": "p1",
+        "key": "subjects",
+        "valueType": "text",
+        "value": "Railway workers"
+      }
+    },
+    {
+      "type": "field",
+      "attrs": {
+        "id": "p2",
+        "key": "objects",
+        "valueType": "text",
+        "value": "Steam locomotive"
+      }
+    },
+    {
+      "type": "field",
+      "attrs": {
+        "id": "p3",
+        "key": "date",
+        "valueType": "date",
+        "value": "1910"
+      }
+    },
+    {
+      "type": "field",
+      "attrs": {
+        "id": "p4",
+        "key": "takenBy",
+        "valueType": "text",
+        "value": "Unknown"
+      }
+    },
+    {
+      "type": "field",
+      "attrs": {
+        "id": "p5",
+        "key": "materialType",
+        "valueType": "select",
+        "value": "print"
+      }
+    },
+    {
+      "type": "field",
+      "attrs": {
+        "id": "p6",
+        "key": "pii",
+        "valueType": "boolean",
+        "value": false
+      }
+    }
+  ]
+}
