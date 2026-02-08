@@ -328,11 +328,18 @@ function EditorActionButton({
 
 export function FindingAidEditor({ content, hierarchyHeadings, onChange }: FindingAidEditorProps) {
   const isApplyingRef = useRef(false);
+  const hierarchyHeadingsRef = useRef(hierarchyHeadings);
+  const onChangeRef = useRef(onChange);
   const contentSignature = useMemo(() => JSON.stringify(content), [content]);
   const hierarchySignature = useMemo(() => JSON.stringify(hierarchyHeadings), [hierarchyHeadings]);
   const syncedContentSignatureRef = useRef(contentSignature);
   const syncedHierarchySignatureRef = useRef(hierarchySignature);
   const [sectionDepth, setSectionDepth] = useState(0);
+
+  useEffect(() => {
+    hierarchyHeadingsRef.current = hierarchyHeadings;
+    onChangeRef.current = onChange;
+  }, [hierarchyHeadings, onChange]);
 
   const editor = useEditor({
     extensions: [
@@ -359,16 +366,16 @@ export function FindingAidEditor({ content, hierarchyHeadings, onChange }: Findi
       }
 
       const fullContent = readContentFromEditor(current.getJSON());
-      const normalized = normalizeHierarchySectionContent(fullContent, hierarchyHeadings);
+      const normalized = normalizeHierarchySectionContent(fullContent, hierarchyHeadingsRef.current);
       const nextSignature = JSON.stringify(normalized);
       if (nextSignature === syncedContentSignatureRef.current) {
         return;
       }
 
       syncedContentSignatureRef.current = nextSignature;
-      onChange(normalized);
+      onChangeRef.current(normalized);
     },
-  }, [hierarchyHeadings]);
+  }, []);
 
   useEffect(() => {
     if (!editor) {

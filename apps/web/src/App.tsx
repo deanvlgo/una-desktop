@@ -15,6 +15,7 @@ import {
   exportCollection,
   listBlockSuggestions,
   listInlineSuggestionIds,
+  moveSeriesRef,
   rejectMoveSubtreeCrossSeries,
   rejectSuggestionBlock,
   rejectSuggestionDelete,
@@ -35,6 +36,7 @@ import manifestFixture from '../../../src/fixtures/manifest.doc.json';
 import suggestionCreateItemFixture from '../../../src/fixtures/suggestion.block.create-item.json';
 import suggestionMoveFixture from '../../../src/fixtures/suggestion.block.move-cross-series.source.json';
 import suggestionReorderFixture from '../../../src/fixtures/suggestion.block.reorder-sibling.json';
+import historiqLogo from './assets/historiq-logo.svg';
 import { FindingAidEditor, buildFindingAidDocJson, type HierarchyHeading } from './components/FindingAidEditor';
 import { FindingAidHierarchy } from './components/FindingAidHierarchy';
 import {
@@ -69,8 +71,10 @@ type ManifestSeriesRef = {
 };
 
 type WorkspaceState = {
-  manifestDoc: CollectionManifestDoc;
+  manifestsByCollectionId: Record<string, CollectionManifestDoc>;
+  collectionOrder: string[];
   seriesDocs: Record<string, SeriesDoc>;
+  activeCollectionId: string;
   activeSeriesDocName: string;
 };
 
@@ -86,11 +90,15 @@ type CmsFieldSpec = {
 
 type PresenceMap = Record<string, Array<{ id: string; name: string; color: string }>>;
 
-const COLLECTION_ID = 'col-001';
-const SERIES_A_DOC_NAME = seriesDocName(COLLECTION_ID, 'series-a');
-const SERIES_B_DOC_NAME = seriesDocName(COLLECTION_ID, 'series-b');
-const SERIES_C_DOC_NAME = seriesDocName(COLLECTION_ID, 'series-c');
-const SERIES_D_DOC_NAME = seriesDocName(COLLECTION_ID, 'series-d');
+const PRIMARY_COLLECTION_ID = 'col-001';
+const SECONDARY_COLLECTION_ID = 'col-002';
+
+const SERIES_A_DOC_NAME = seriesDocName(PRIMARY_COLLECTION_ID, 'series-a');
+const SERIES_B_DOC_NAME = seriesDocName(PRIMARY_COLLECTION_ID, 'series-b');
+const SERIES_C_DOC_NAME = seriesDocName(PRIMARY_COLLECTION_ID, 'series-c');
+const SERIES_D_DOC_NAME = seriesDocName(SECONDARY_COLLECTION_ID, 'series-d');
+const SERIES_E_DOC_NAME = seriesDocName(SECONDARY_COLLECTION_ID, 'series-e');
+const SERIES_F_DOC_NAME = seriesDocName(SECONDARY_COLLECTION_ID, 'series-f');
 
 const CMS_LEVEL_COLORS: Record<HierarchyLevel, string> = {
   series: '#ff5757',
@@ -135,11 +143,13 @@ const CMS_FIELDS: CmsFieldSpec[] = [
 
 const LOCAL_USER = { id: 'user-local', name: 'You', color: '#ff5757' };
 const PEER_USER = { id: 'user-peer', name: 'Peer', color: '#3b82f6' };
+const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
 
 export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>(() => createInitialWorkspace());
   const [focusStateByDoc, setFocusStateByDoc] = useState<FocusStateMap>({});
   const [railPanelMode, setRailPanelMode] = useState<RailPanelMode>('collections');
+  const [collectionSearch, setCollectionSearch] = useState('');
   const [debugMode, setDebugMode] = useState(() => {
     if (typeof window === 'undefined') {
       return false;
@@ -154,11 +164,94 @@ export function App() {
   const [actionLogStore] = useState(() => new InMemoryAgentActionLog());
   const [awarenessStore] = useState(() => new AwarenessStore());
 
-  const seriesRefs = useMemo(() => readManifestSeriesRefs(workspace.manifestDoc), [workspace.manifestDoc]);
+  const activeManifestDoc = useMemo(
+    () => workspace.manifestsByCollectionId[workspace.activeCollectionId] ?? null,
+    [workspace.activeCollectionId, workspace.manifestsByCollectionId],
+  );
+
+  const seriesRefs = useMemo(() => {
+    if (!activeManifestDoc) {
+      return [] as ManifestSeriesRef[];
+    }
+    return readManifestSeriesRefs(activeManifestDoc);
+  }, [activeManifestDoc]);
+
+  const collectionEntries = useMemo(() => {
+    return workspace.collectionOrder
+      .map((collectionId) => {
+        const manifest = workspace.manifestsByCollectionId[collectionId];
+        if (!manifest) {
+          return null;
+        }
+
+        const root = manifest.content[0];
+        const refs = readManifestSeriesRefs(manifest);
+        const activeCount = refs.reduce((sum, ref) => sum + (collectionPresence[ref.docName] ?? 0), 0);
+        return {
+          collectionId,
+          title: String(root.attrs?.title ?? 'Untitled Collection'),
+          description: readCollectionDescription(manifest),
+          dates: String(root.attrs?.dates ?? ''),
+          seriesRefs: refs,
+          activeCount,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry != null);
+  }, [workspace.collectionOrder, workspace.manifestsByCollectionId, collectionPresence]);
+
+  const filteredCollectionEntries = useMemo(() => {
+    const query = collectionSearch.trim().toLowerCase();
+    if (!query) {
+      return collectionEntries;
+    }
+
+    return collectionEntries.filter((entry) => {
+      return (
+        entry.title.toLowerCase().includes(query) ||
+        entry.collectionId.toLowerCase().includes(query) ||
+        entry.description.toLowerCase().includes(query)
+      );
+    });
+  }, [collectionEntries, collectionSearch]);
+
   const activeSeriesRef = useMemo(
     () => seriesRefs.find((series) => series.docName === workspace.activeSeriesDocName) ?? null,
     [seriesRefs, workspace.activeSeriesDocName],
   );
+
+  const activeCollectionDescription = useMemo(() => {
+    if (!activeManifestDoc) {
+      return '';
+    }
+    return readCollectionDescription(activeManifestDoc);
+  }, [activeManifestDoc]);
+
+  const activeInstitutionName = useMemo(() => {
+    if (!activeManifestDoc) {
+      return 'Institution Name';
+    }
+    return readCollectionInstitution(activeManifestDoc);
+  }, [activeManifestDoc]);
+
+  useEffect(() => {
+    if (seriesRefs.length === 0) {
+      return;
+    }
+
+    if (seriesRefs.some((series) => series.docName === workspace.activeSeriesDocName)) {
+      return;
+    }
+
+    const fallbackDocName = seriesRefs[0]?.docName;
+    if (!fallbackDocName) {
+      return;
+    }
+
+    setWorkspace((previous) => ({
+      ...previous,
+      activeSeriesDocName: fallbackDocName,
+    }));
+  }, [seriesRefs, workspace.activeSeriesDocName]);
 
   const activeSeriesDoc = workspace.seriesDocs[workspace.activeSeriesDocName] ?? null;
 
@@ -181,7 +274,7 @@ export function App() {
 
       return {
         ...previous,
-        [workspace.activeSeriesDocName]: createInitialFocusState(activeHierarchy.id),
+        [workspace.activeSeriesDocName]: createFocusStateForHierarchy(activeHierarchy),
       };
     });
   }, [activeHierarchy, workspace.activeSeriesDocName]);
@@ -190,7 +283,7 @@ export function App() {
     activeHierarchy && focusStateByDoc[workspace.activeSeriesDocName]
       ? focusStateByDoc[workspace.activeSeriesDocName]
       : activeHierarchy
-        ? createInitialFocusState(activeHierarchy.id)
+        ? createFocusStateForHierarchy(activeHierarchy)
         : null;
 
   const updateCurrentFocusState = useCallback(
@@ -200,7 +293,7 @@ export function App() {
       }
 
       setFocusStateByDoc((previous) => {
-        const current = previous[workspace.activeSeriesDocName] ?? createInitialFocusState(activeHierarchy.id);
+        const current = previous[workspace.activeSeriesDocName] ?? createFocusStateForHierarchy(activeHierarchy);
         return {
           ...previous,
           [workspace.activeSeriesDocName]: updater(current),
@@ -222,7 +315,7 @@ export function App() {
     updateCurrentFocusState((state) => ({
       ...state,
       focusedId: activeHierarchy.id,
-      expandedIds: new Set([activeHierarchy.id]),
+      expandedIds: state.expandedIds.size > 0 ? new Set(state.expandedIds) : collectHierarchyIds(activeHierarchy),
     }));
   }, [activeHierarchy, currentFocusState, updateCurrentFocusState]);
 
@@ -305,6 +398,32 @@ export function App() {
     [seriesBodyNodes],
   );
 
+  const workspaceCollectionsJson = useMemo(
+    () => ({
+      activeCollectionId: workspace.activeCollectionId,
+      activeSeriesDocName: workspace.activeSeriesDocName,
+      collectionOrder: workspace.collectionOrder,
+      manifestsByCollectionId: workspace.manifestsByCollectionId,
+    }),
+    [
+      workspace.activeCollectionId,
+      workspace.activeSeriesDocName,
+      workspace.collectionOrder,
+      workspace.manifestsByCollectionId,
+    ],
+  );
+
+  const activeFocusStateJson = useMemo(() => {
+    if (!currentFocusState) {
+      return null;
+    }
+
+    return {
+      ...currentFocusState,
+      expandedIds: Array.from(currentFocusState.expandedIds),
+    };
+  }, [currentFocusState]);
+
   const updateActiveSeriesDoc = useCallback((updater: (doc: SeriesDoc) => SeriesDoc) => {
     setWorkspace((previous) => {
       const current = previous.seriesDocs[previous.activeSeriesDocName];
@@ -323,17 +442,88 @@ export function App() {
     });
   }, []);
 
+  const updateCollectionManifest = useCallback(
+    (collectionId: string, updater: (manifest: CollectionManifestDoc) => CollectionManifestDoc) => {
+      setWorkspace((previous) => {
+        const current = previous.manifestsByCollectionId[collectionId];
+        if (!current) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          manifestsByCollectionId: {
+            ...previous.manifestsByCollectionId,
+            [collectionId]: updater(current),
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const renameCollectionTitle = useCallback(
+    (collectionId: string, title: string) => {
+      updateCollectionManifest(collectionId, (manifest) => {
+        const next = structuredClone(manifest);
+        const root = next.content[0];
+        root.attrs = {
+          ...(root.attrs ?? {}),
+          title,
+        };
+        return next;
+      });
+    },
+    [updateCollectionManifest],
+  );
+
   const setActiveSeriesDocName = useCallback((docName: string) => {
-    setWorkspace((previous) => ({
-      ...previous,
-      activeSeriesDocName: docName,
-    }));
+    setWorkspace((previous) => {
+      if (!previous.seriesDocs[docName]) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        activeSeriesDocName: docName,
+      };
+    });
   }, []);
 
-  const openSeriesFromBrowser = useCallback(
+  const setActiveCollectionId = useCallback((collectionId: string) => {
+    setWorkspace((previous) => {
+      const manifest = previous.manifestsByCollectionId[collectionId];
+      if (!manifest) {
+        return previous;
+      }
+
+      const refs = readManifestSeriesRefs(manifest);
+      const nextActiveDocName =
+        refs.find((ref) => ref.docName === previous.activeSeriesDocName)?.docName ?? refs[0]?.docName ?? null;
+
+      if (!nextActiveDocName) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        activeCollectionId: collectionId,
+        activeSeriesDocName: nextActiveDocName,
+      };
+    });
+  }, []);
+
+  const openCollectionFromBrowser = useCallback(
+    (collectionId: string) => {
+      setActiveCollectionId(collectionId);
+      setRailPanelMode('hierarchy');
+    },
+    [setActiveCollectionId],
+  );
+
+  const openSeriesInHierarchy = useCallback(
     (docName: string) => {
       setActiveSeriesDocName(docName);
-      setRailPanelMode('hierarchy');
     },
     [setActiveSeriesDocName],
   );
@@ -343,7 +533,6 @@ export function App() {
       updateCurrentFocusState((state) => ({
         ...state,
         focusedId: id,
-        mode: 'focus',
         expandedIds: new Set(state.expandedIds),
       }));
     },
@@ -413,6 +602,56 @@ export function App() {
       setLogVersion((value) => value + 1);
     },
     [actionLogStore],
+  );
+
+  const applyManifestSeriesMove = useCallback(
+    (draggedDocName: string, targetDocName: string, placement: 'before' | 'after') => {
+      if (!activeManifestDoc) {
+        return;
+      }
+
+      const refs = readManifestSeriesRefs(activeManifestDoc);
+      const fromIndex = refs.findIndex((ref) => ref.docName === draggedDocName);
+      const targetIndex = refs.findIndex((ref) => ref.docName === targetDocName);
+      if (fromIndex < 0 || targetIndex < 0) {
+        return;
+      }
+
+      let toIndex = placement === 'before' ? targetIndex : targetIndex + 1;
+      if (fromIndex < toIndex) {
+        toIndex -= 1;
+      }
+
+      if (toIndex === fromIndex) {
+        return;
+      }
+
+      setWorkspace((previous) => {
+        const manifest = previous.manifestsByCollectionId[previous.activeCollectionId];
+        if (!manifest) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          manifestsByCollectionId: {
+            ...previous.manifestsByCollectionId,
+            [previous.activeCollectionId]: moveSeriesRef(manifest, fromIndex, toIndex),
+          },
+        };
+      });
+
+      appendActionLog({
+        opId: crypto.randomUUID(),
+        userId: LOCAL_USER.id,
+        createdAt: Date.now(),
+        docNames: [draggedDocName, targetDocName],
+        suggestionIds: [],
+        promptSummary: `MANUAL REORDER SERIES ${draggedDocName} ${placement} ${targetDocName}`,
+        result: 'ok',
+      });
+    },
+    [activeManifestDoc, appendActionLog],
   );
 
   const applyBlockSuggestionDecision = useCallback(
@@ -681,6 +920,10 @@ export function App() {
   );
 
   const stageCrossSeriesMoveProposal = useCallback(() => {
+    if (workspace.activeCollectionId !== PRIMARY_COLLECTION_ID) {
+      return;
+    }
+
     const sourceDoc = workspace.seriesDocs[SERIES_A_DOC_NAME];
     const targetDoc = workspace.seriesDocs[SERIES_B_DOC_NAME];
     if (!sourceDoc || !targetDoc) {
@@ -729,7 +972,9 @@ export function App() {
       promptSummary: 'DEBUG STAGE MOVE file-a2 -> subseries-b2',
       result: 'ok',
     });
-  }, [appendActionLog, workspace.seriesDocs]);
+  }, [appendActionLog, workspace.activeCollectionId, workspace.seriesDocs]);
+
+  const canStagePrimaryDebugMove = workspace.activeCollectionId === PRIMARY_COLLECTION_ID;
 
   const moveSuggestionIds = useMemo(() => {
     const ids = new Set<string>();
@@ -744,102 +989,131 @@ export function App() {
   }, [workspace.seriesDocs]);
 
   const runExport = useCallback(() => {
+    if (!activeManifestDoc) {
+      return;
+    }
+
     const doc = exportCollection({
-      manifestDoc: workspace.manifestDoc,
+      manifestDoc: activeManifestDoc,
       seriesDocsByDocName: workspace.seriesDocs,
     });
     setExportPreview(JSON.stringify(doc, null, 2));
-  }, [workspace]);
+  }, [activeManifestDoc, workspace.seriesDocs]);
 
-  if (!activeSeriesDoc || !activeHierarchy || !currentFocusState) {
+  if (!activeManifestDoc || !activeSeriesDoc || !activeHierarchy || !currentFocusState) {
     return <div className="app-shell">No active series document loaded.</div>;
   }
 
-  const manifestRoot = workspace.manifestDoc.content[0];
-  const activePresenceCount = collectionPresence[workspace.activeSeriesDocName] ?? 0;
+  const manifestRoot = activeManifestDoc.content[0];
+  const activeSeriesPresenceCount = collectionPresence[workspace.activeSeriesDocName] ?? 0;
   const linkedImages = focusedNode?.level === 'item' ? extractLinkedImages(focusedNode.fields) : [];
   const groupedItemFields = focusedNode?.level === 'item' ? groupItemFieldsForCms(focusedNode.fields) : [];
   const cmsLevelColor = focusedNode ? CMS_LEVEL_COLORS[focusedNode.level] : '#6b7280';
   const metadataByKey = focusedNode?.metadata ?? {};
+  const activeCollectionTitle = String(manifestRoot.attrs?.title ?? 'Untitled Collection');
+  const activeCollectionDescriptionText =
+    activeCollectionDescription.length > 0 ? activeCollectionDescription : 'No collection description provided yet.';
 
   return (
     <div className="app-shell">
       <header className="workspace-header">
-        <div>
-          <p className="workspace-header__kicker">Collaborative Archival Editor</p>
-          <h1>{String(manifestRoot.attrs?.title ?? 'Untitled Collection')}</h1>
-          <p className="workspace-header__sub">
-            Manifest room `collection:{COLLECTION_ID}` + active series room `{workspace.activeSeriesDocName}`
-          </p>
+        <div className="workspace-header__brand">
+          <div className="workspace-header__logo-stack">
+            <img src={historiqLogo} alt="Historiq" className="workspace-header__logo" />
+            <p className="workspace-header__kicker">Collaborative Editor</p>
+          </div>
+
+          <div className="workspace-header__meta">
+            <label className="workspace-header__title-wrap" htmlFor="active-collection-title">
+              <span className="sr-only">Active collection title</span>
+              <input
+                id="active-collection-title"
+                className="workspace-header__title-input"
+                value={activeCollectionTitle}
+                onChange={(event) => renameCollectionTitle(workspace.activeCollectionId, event.target.value)}
+              />
+            </label>
+            <p className="workspace-header__sub">{activeCollectionDescriptionText}</p>
+          </div>
         </div>
 
         <div className="header-actions">
-          <div className="mode-toggle" role="tablist" aria-label="Editor mode">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={currentFocusState.mode === 'document'}
-              className={
-                currentFocusState.mode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-              }
-              onClick={() =>
-                updateCurrentFocusState((state) => ({
-                  ...state,
-                  mode: 'document',
-                  expandedIds: new Set(state.expandedIds),
-                }))
-              }
-            >
-              Document View
+          <p className="header-actions__institution">{activeInstitutionName}</p>
+          <div className="header-actions__controls">
+            <div className="mode-toggle" role="tablist" aria-label="Editor mode">
+              <button
+                type="button"
+                data-mode="document"
+                role="tab"
+                aria-selected={currentFocusState.mode === 'document'}
+                className={
+                  currentFocusState.mode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                }
+                onClick={() =>
+                  updateCurrentFocusState((state) => ({
+                    ...state,
+                    mode: 'document',
+                    expandedIds: new Set(state.expandedIds),
+                  }))
+                }
+              >
+                Document View
+              </button>
+
+              <button
+                type="button"
+                data-mode="focus"
+                role="tab"
+                aria-selected={currentFocusState.mode === 'focus'}
+                className={
+                  currentFocusState.mode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                }
+                onClick={() =>
+                  updateCurrentFocusState((state) => ({
+                    ...state,
+                    mode: 'focus',
+                    expandedIds: new Set(state.expandedIds),
+                  }))
+                }
+              >
+                CMS / Focus View
+              </button>
+
+              <button
+                type="button"
+                data-mode="json"
+                role="tab"
+                aria-selected={currentFocusState.mode === 'json'}
+                className={
+                  currentFocusState.mode === 'json' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                }
+                onClick={() =>
+                  updateCurrentFocusState((state) => ({
+                    ...state,
+                    mode: 'json',
+                    expandedIds: new Set(state.expandedIds),
+                  }))
+                }
+              >
+                JSON View
+              </button>
+            </div>
+
+            <button type="button" className="header-user" title="Logged in user (placeholder)">
+              <span className="header-user__avatar">AR</span>
             </button>
 
-            <button
-              type="button"
-              role="tab"
-              aria-selected={currentFocusState.mode === 'focus'}
-              className={
-                currentFocusState.mode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-              }
-              onClick={() =>
-                updateCurrentFocusState((state) => ({
-                  ...state,
-                  mode: 'focus',
-                  expandedIds: new Set(state.expandedIds),
-                }))
-              }
-            >
-              CMS / Focus View
-            </button>
-
-            <button
-              type="button"
-              role="tab"
-              aria-selected={currentFocusState.mode === 'json'}
-              className={
-                currentFocusState.mode === 'json' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-              }
-              onClick={() =>
-                updateCurrentFocusState((state) => ({
-                  ...state,
-                  mode: 'json',
-                  expandedIds: new Set(state.expandedIds),
-                }))
-              }
-            >
-              JSON View
-            </button>
+            {debugMode ? (
+              <button
+                type="button"
+                className="debug-toggle debug-toggle--active"
+                onClick={() => setDebugMode(false)}
+                title="Debug mode is active (Ctrl/Cmd+Shift+D toggles)"
+              >
+                Debug On
+              </button>
+            ) : null}
           </div>
-
-          {debugMode ? (
-            <button
-              type="button"
-              className="debug-toggle debug-toggle--active"
-              onClick={() => setDebugMode(false)}
-              title="Debug mode is active (Ctrl/Cmd+Shift+D toggles)"
-            >
-              Debug On
-            </button>
-          ) : null}
         </div>
       </header>
 
@@ -849,36 +1123,69 @@ export function App() {
             {railPanelMode === 'collections' ? (
               <>
                 <h2>Collection Browser</h2>
-                <p className="manifest-panel__dates">{String(manifestRoot.attrs?.dates ?? '')}</p>
                 <p className="browser-panel__hint">
-                  Select a series to open the guided hierarchy editor for that series.
+                  Select a collection, then choose and edit series in the hierarchy view.
                 </p>
+                <label className="collection-search">
+                  <span>Search Collections</span>
+                  <input
+                    type="search"
+                    placeholder="Search by name, id, or description"
+                    value={collectionSearch}
+                    onChange={(event) => setCollectionSearch(event.target.value)}
+                  />
+                </label>
                 <ul className="manifest-panel__series-list">
-                  {seriesRefs.map((series) => {
-                    const presence = collectionPresence[series.docName] ?? 0;
+                  {filteredCollectionEntries.map((collection, index) => {
                     return (
-                      <li key={series.docName}>
-                        <button
-                          type="button"
+                      <li key={collection.collectionId}>
+                        <div
                           className={
-                            workspace.activeSeriesDocName === series.docName
+                            workspace.activeCollectionId === collection.collectionId
                               ? 'manifest-series manifest-series--active'
                               : 'manifest-series'
                           }
-                          onClick={() => openSeriesFromBrowser(series.docName)}
                         >
-                          <span className="manifest-series__order">{series.order}</span>
-                          <span className="manifest-series__body">
-                            <strong>{series.title}</strong>
-                            <small>{series.docName}</small>
-                          </span>
-                          <span className="manifest-series__presence">{presence} active</span>
-                        </button>
+                          <div
+                            className="manifest-series__open"
+                            onClick={() => openCollectionFromBrowser(collection.collectionId)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                openCollectionFromBrowser(collection.collectionId);
+                              }
+                            }}
+                            role="button"
+                            tabIndex={0}
+                          >
+                            <span className="manifest-series__order">{index + 1}</span>
+                            <span className="manifest-series__body">
+                              <input
+                                type="text"
+                                className="manifest-series__title-input"
+                                value={collection.title}
+                                onClick={(event) => event.stopPropagation()}
+                                onKeyDown={(event) => event.stopPropagation()}
+                                onFocus={() => setActiveCollectionId(collection.collectionId)}
+                                onChange={(event) => renameCollectionTitle(collection.collectionId, event.target.value)}
+                              />
+                              <small>
+                                {collection.collectionId} · {collection.seriesRefs.length} series
+                              </small>
+                            </span>
+                            <span className="manifest-series__presence">
+                              {collection.activeCount} active {collection.activeCount === 1 ? 'user' : 'users'}
+                            </span>
+                          </div>
+                        </div>
                       </li>
                     );
                   })}
                 </ul>
-                <p className="manifest-panel__presence-note">Current room: {activePresenceCount} active</p>
+                {filteredCollectionEntries.length === 0 ? (
+                  <p className="manifest-panel__presence-note">No collections match your search.</p>
+                ) : null}
+                <p className="manifest-panel__presence-note">Collections loaded: {collectionEntries.length}</p>
               </>
             ) : (
               <>
@@ -891,16 +1198,27 @@ export function App() {
                     Back to Collections
                   </button>
                   <div className="browser-panel__series-meta">
-                    <h2>{activeSeriesRef?.title ?? 'Guided Hierarchy'}</h2>
-                    <p>{workspace.activeSeriesDocName}</p>
+                    <h2>{String(manifestRoot.attrs?.title ?? 'Guided Hierarchy')}</h2>
+                    <p>
+                      {String(manifestRoot.attrs?.dates ?? '')} · {seriesRefs.length} series
+                    </p>
                   </div>
                 </div>
+
                 <p className="hierarchy-panel__hint">
-                  Drag handles reorder siblings within a level, matching PRD-safe hierarchy behavior.
+                  Editing series: {activeSeriesRef?.title ?? workspace.activeSeriesDocName} ({activeSeriesPresenceCount}{' '}
+                  active {activeSeriesPresenceCount === 1 ? 'user' : 'users'})
                 </p>
                 <FindingAidHierarchy
                   root={activeHierarchy}
                   focusState={currentFocusState}
+                  seriesOptions={seriesRefs.map((series) => ({
+                    docName: series.docName,
+                    title: series.title,
+                    presenceCount: collectionPresence[series.docName] ?? 0,
+                  }))}
+                  activeSeriesDocName={workspace.activeSeriesDocName}
+                  onSelectSeries={openSeriesInHierarchy}
                   presenceByNodeId={presenceByNodeId}
                   onFocus={focusHierarchyNode}
                   onToggleExpand={(id) =>
@@ -919,6 +1237,7 @@ export function App() {
                     })
                   }
                   onMove={applyManualHierarchyMove}
+                  onMoveSeries={applyManifestSeriesMove}
                   onIndent={applyManualHierarchyIndent}
                   onOutdent={applyManualHierarchyOutdent}
                   onAddChild={applyManualHierarchyAddChild}
@@ -934,9 +1253,6 @@ export function App() {
           {currentFocusState.mode === 'document' ? (
             <section className="panel document-panel">
               <h2>Document View</h2>
-              <p className="document-panel__hint">
-                Word-style finding aid editing backed by canonical `seriesBody` JSON.
-              </p>
 
               <FindingAidEditor
                 content={seriesBodyNodes as PMNode[]}
@@ -1108,8 +1424,39 @@ export function App() {
             <section className="panel json-panel">
               <h2>JSON View</h2>
               <p className="json-panel__hint">
-                Raw TipTap JSON under the hood: persisted `seriesBody` and the editor-rendered doc after hierarchy normalization.
+                Source-of-truth data and transformed editor data used by the hierarchy, document, and CMS screens.
               </p>
+
+              <div className="json-panel__explain">
+                <h3>How It Works</h3>
+                <ol className="json-panel__explain-list">
+                  <li>
+                    Collection manifests are the source of truth for collection title, description, and ordered series refs.
+                  </li>
+                  <li>
+                    Each series has its own canonical TipTap-compatible JSON document; hierarchy nodes and body sections live there.
+                  </li>
+                  <li>
+                    The hierarchy widget edits node structure and metadata; those updates synchronize into both Document and CMS views.
+                  </li>
+                  <li>
+                    Document view renders a Word-style composite doc by combining canonical `seriesBody` with synthetic hierarchy headings.
+                  </li>
+                  <li>
+                    CMS view is generated from the currently focused hierarchy node and writes metadata straight back to canonical JSON.
+                  </li>
+                </ol>
+              </div>
+
+              <div className="json-panel__block">
+                <h3>Workspace + Collections Manifest JSON (canonical collection state)</h3>
+                <pre>{JSON.stringify(workspaceCollectionsJson, null, 2)}</pre>
+              </div>
+
+              <div className="json-panel__block">
+                <h3>Active Focus State JSON</h3>
+                <pre>{JSON.stringify(activeFocusStateJson, null, 2)}</pre>
+              </div>
 
               <div className="json-panel__block">
                 <h3>Persisted `seriesBody` JSON (canonical, section-bound)</h3>
@@ -1136,16 +1483,21 @@ export function App() {
                 Seed and test inter-series moves in this collection. Current pending move proposals: {moveSuggestionIds.length}
               </p>
               <div className="cross-series-playground__actions">
-                <button type="button" onClick={() => openSeriesFromBrowser(SERIES_A_DOC_NAME)}>
+                <button type="button" onClick={() => openSeriesInHierarchy(SERIES_A_DOC_NAME)} disabled={!canStagePrimaryDebugMove}>
                   Open Series A
                 </button>
-                <button type="button" onClick={() => openSeriesFromBrowser(SERIES_B_DOC_NAME)}>
+                <button type="button" onClick={() => openSeriesInHierarchy(SERIES_B_DOC_NAME)} disabled={!canStagePrimaryDebugMove}>
                   Open Series B
                 </button>
-                <button type="button" onClick={stageCrossSeriesMoveProposal}>
+                <button type="button" onClick={stageCrossSeriesMoveProposal} disabled={!canStagePrimaryDebugMove}>
                   Stage Move A → B (file-a2)
                 </button>
               </div>
+              {!canStagePrimaryDebugMove ? (
+                <p className="cross-series-playground__note">
+                  Debug cross-series staging is seeded only for Railroad Company Records.
+                </p>
+              ) : null}
             </div>
 
             {Array.from(suggestionsByGroup.entries()).map(([groupId, ids]) => (
@@ -1304,7 +1656,7 @@ type CmsMetadataInputProps = {
 function CmsMetadataInput({ label, value, placeholder, multiline, onChange }: CmsMetadataInputProps) {
   if (multiline) {
     return (
-      <label className="field-input">
+      <label className="field-input field-input--multiline">
         <span>{label}</span>
         <textarea value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
       </label>
@@ -1384,6 +1736,40 @@ function toTitleCase(value: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function readCollectionDescription(manifest: CollectionManifestDoc): string {
+  const root = manifest.content[0];
+  const attrs = root.attrs ?? {};
+  const descriptionValue = (attrs as Record<string, unknown>).description;
+
+  if (typeof descriptionValue === 'string' && descriptionValue.trim().length > 0) {
+    return descriptionValue.trim();
+  }
+
+  const metaNode = (root.content ?? []).find((node) => node.type === 'collectionMeta');
+  if (!metaNode) {
+    return '';
+  }
+
+  return readPlainText(metaNode).replace(/\s+/g, ' ').trim();
+}
+
+function readCollectionInstitution(manifest: CollectionManifestDoc): string {
+  void manifest;
+  return DEFAULT_INSTITUTION_NAME;
+}
+
+function readPlainText(node: PMNode): string {
+  if (node.type === 'text') {
+    return String((node as PMNode & { text?: string }).text ?? '');
+  }
+
+  if (!node.content || node.content.length === 0) {
+    return '';
+  }
+
+  return node.content.map((entry) => readPlainText(entry as PMNode)).join(' ');
+}
+
 function readManifestSeriesRefs(manifest: CollectionManifestDoc): ManifestSeriesRef[] {
   const root = manifest.content[0];
   const nodes = root.content ?? [];
@@ -1442,12 +1828,35 @@ function flattenHierarchyHeadingsForDocument(root: HierarchyNode): HierarchyHead
   return headings;
 }
 
+function createFocusStateForHierarchy(root: HierarchyNode): FocusState {
+  const next = createInitialFocusState(root.id);
+  next.expandedIds = collectHierarchyIds(root);
+  return next;
+}
+
+function collectHierarchyIds(root: HierarchyNode): Set<string> {
+  const ids = new Set<string>();
+
+  const walk = (node: HierarchyNode) => {
+    ids.add(node.id);
+    for (const child of node.children) {
+      walk(child);
+    }
+  };
+
+  walk(root);
+  return ids;
+}
+
 function createInitialWorkspace(): WorkspaceState {
-  const manifestDoc = structuredClone(manifestFixture) as CollectionManifestDoc;
+  const primaryManifestDoc = structuredClone(manifestFixture) as CollectionManifestDoc;
+  const secondaryManifestDoc = createSecondaryManifestStub();
   const sourceDoc = createSeriesAStub();
   let targetDoc = createSeriesBStub();
   const tertiaryDoc = createSeriesCStub();
   const quaternaryDoc = createSeriesDStub();
+  const quinaryDoc = createSeriesEStub();
+  const senaryDoc = createSeriesFStub();
 
   targetDoc = injectInlineSuggestionParagraphs(targetDoc);
   targetDoc = appendSeriesOpSuggestion(
@@ -1507,15 +1916,24 @@ function createInitialWorkspace(): WorkspaceState {
   const seededTarget = syncSeriesBodyWithHierarchy(paired.targetDoc);
   const seededTertiary = syncSeriesBodyWithHierarchy(tertiaryDoc);
   const seededQuaternary = syncSeriesBodyWithHierarchy(quaternaryDoc);
+  const seededQuinary = syncSeriesBodyWithHierarchy(quinaryDoc);
+  const seededSenary = syncSeriesBodyWithHierarchy(senaryDoc);
 
   return {
-    manifestDoc,
+    manifestsByCollectionId: {
+      [PRIMARY_COLLECTION_ID]: primaryManifestDoc,
+      [SECONDARY_COLLECTION_ID]: secondaryManifestDoc,
+    },
+    collectionOrder: [PRIMARY_COLLECTION_ID, SECONDARY_COLLECTION_ID],
     seriesDocs: {
       [SERIES_A_DOC_NAME]: seededSource,
       [SERIES_B_DOC_NAME]: seededTarget,
       [SERIES_C_DOC_NAME]: seededTertiary,
       [SERIES_D_DOC_NAME]: seededQuaternary,
+      [SERIES_E_DOC_NAME]: seededQuinary,
+      [SERIES_F_DOC_NAME]: seededSenary,
     },
+    activeCollectionId: PRIMARY_COLLECTION_ID,
     activeSeriesDocName: SERIES_B_DOC_NAME,
   };
 }
@@ -1535,6 +1953,65 @@ function injectInlineSuggestionParagraphs(doc: SeriesDoc): SeriesDoc {
   ];
 
   return next;
+}
+
+function createSecondaryManifestStub(): CollectionManifestDoc {
+  return {
+    type: 'doc',
+    content: [
+      {
+        type: 'collectionManifest',
+        attrs: {
+          collectionId: SECONDARY_COLLECTION_ID,
+          title: 'City Planning Department Records',
+          dates: '1908-2005',
+        },
+        content: [
+          {
+            type: 'collectionMeta',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Municipal planning records covering zoning, redevelopment, and civic design initiatives.',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            type: 'seriesRef',
+            attrs: {
+              seriesId: 'series-d',
+              title: 'Policy and Governance Files',
+              order: 1,
+              docName: SERIES_D_DOC_NAME,
+            },
+          },
+          {
+            type: 'seriesRef',
+            attrs: {
+              seriesId: 'series-e',
+              title: 'Neighborhood Survey Photography',
+              order: 2,
+              docName: SERIES_E_DOC_NAME,
+            },
+          },
+          {
+            type: 'seriesRef',
+            attrs: {
+              seriesId: 'series-f',
+              title: 'Redevelopment Project Plans',
+              order: 3,
+              docName: SERIES_F_DOC_NAME,
+            },
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function createSeriesAStub(): SeriesDoc {
@@ -1907,16 +2384,16 @@ function createSeriesDStub(): SeriesDoc {
         type: 'series',
         attrs: {
           id: 'series-d',
-          title: 'Oral Histories',
-          dates: '1978-1992',
-          refCode: 'RR-MS-004',
-          extent: '42 interviews',
+          title: 'Policy and Governance Files',
+          dates: '1912-1989',
+          refCode: 'CPD-MS-001',
+          extent: '9 linear feet',
           language: 'English',
-          arrangement: 'By interviewee surname.',
-          scopeContent: 'Recorded interviews with former employees and family members.',
-          accessRestrictions: 'Audio files available onsite only.',
-          processingStatus: 'minimally-processed',
-          digitalObjectUrl: 'https://example.org/collections/rr/series-d',
+          arrangement: 'By planning commission agenda item and ordinance sequence.',
+          scopeContent: 'Administrative policy files, planning commission agendas, and adopted ordinances.',
+          accessRestrictions: 'Open for research with limited redactions for personal data.',
+          processingStatus: 'processed',
+          digitalObjectUrl: 'https://example.org/collections/cpd/series-d',
         },
         content: [
           {
@@ -1931,7 +2408,7 @@ function createSeriesDStub(): SeriesDoc {
                 content: [
                   {
                     type: 'text',
-                    text: 'Interviews documenting labor history, station life, and community impact.',
+                    text: 'Records documenting planning decisions, public hearings, and ordinance implementation.',
                   },
                 ],
               },
@@ -1941,21 +2418,193 @@ function createSeriesDStub(): SeriesDoc {
             type: 'subseries',
             attrs: {
               id: 'subseries-d1',
-              title: 'Audio Cassettes',
-              dates: '1978-1985',
-              refCode: 'RR-MS-004.1',
-              extent: '28 cassettes',
+              title: 'Commission Minutes',
+              dates: '1912-1968',
+              refCode: 'CPD-MS-001.1',
+              extent: '4 linear feet',
+              processingStatus: 'processed',
+            },
+            content: [
+              createFileNode('file-d1-1', 'Planning Commission Minute Books', [
+                createItemNode(
+                  'item-gov-001',
+                  'document',
+                  'Bound minutes documenting zoning appeals and redevelopment votes.',
+                  '1937-04-11',
+                ),
+              ]),
+            ],
+          },
+          {
+            type: 'subseries',
+            attrs: {
+              id: 'subseries-d2',
+              title: 'Zoning Ordinances',
+              dates: '1940-1989',
+              refCode: 'CPD-MS-001.2',
+              extent: '5 linear feet',
+              processingStatus: 'processed',
+            },
+            content: [
+              createFileNode('file-d2-1', 'Adopted Ordinance Packets', [
+                createItemNode(
+                  'item-zone-001',
+                  'document',
+                  'Published ordinance packet with maps and implementation notes.',
+                  '1974-02-20',
+                ),
+              ]),
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function createSeriesEStub(): SeriesDoc {
+  return {
+    type: 'doc',
+    content: [
+      {
+        type: 'series',
+        attrs: {
+          id: 'series-e',
+          title: 'Neighborhood Survey Photography',
+          dates: '1935-1998',
+          refCode: 'CPD-MS-002',
+          extent: '1,480 photographic prints and contact sheets',
+          language: 'English',
+          arrangement: 'By district and survey campaign.',
+          scopeContent: 'Survey photography used to evaluate streets, housing stock, and civic infrastructure.',
+          accessRestrictions: 'Some images restricted for privacy review.',
+          processingStatus: 'in-progress',
+          digitalObjectUrl: 'https://example.org/collections/cpd/series-e',
+        },
+        content: [
+          {
+            type: 'seriesOps',
+            content: [],
+          },
+          {
+            type: 'seriesBody',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Photographic surveys capturing neighborhood conditions before redevelopment initiatives.',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            type: 'subseries',
+            attrs: {
+              id: 'subseries-e1',
+              title: 'South District Survey',
+              dates: '1958-1972',
+              refCode: 'CPD-MS-002.1',
+              extent: '620 prints',
+              processingStatus: 'processed',
+            },
+            content: [
+              createFileNode('file-e1-1', 'Residential Block Conditions', [
+                createItemNode(
+                  'item-survey-photo-001',
+                  'photograph',
+                  'Street-level survey image showing storefront occupancy and facade condition.',
+                  '1961',
+                ),
+              ]),
+            ],
+          },
+          {
+            type: 'subseries',
+            attrs: {
+              id: 'subseries-e2',
+              title: 'Downtown Streetscape',
+              dates: '1970-1998',
+              refCode: 'CPD-MS-002.2',
+              extent: '860 prints',
+              processingStatus: 'in-progress',
+            },
+            content: [
+              createFileNode('file-e2-1', 'Transit Corridor Survey', [
+                createItemNode(
+                  'item-survey-photo-050',
+                  'photograph',
+                  'Aerial capture of transit corridor slated for redesign.',
+                  '1988',
+                ),
+              ]),
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function createSeriesFStub(): SeriesDoc {
+  return {
+    type: 'doc',
+    content: [
+      {
+        type: 'series',
+        attrs: {
+          id: 'series-f',
+          title: 'Redevelopment Project Plans',
+          dates: '1949-2005',
+          refCode: 'CPD-MS-003',
+          extent: '220 plan sets',
+          language: 'English',
+          arrangement: 'By project code and revision number.',
+          scopeContent: 'Master plans, phased development documents, and site revision sets.',
+          accessRestrictions: 'Open for use; oversized plans require handling support.',
+          processingStatus: 'processed',
+          digitalObjectUrl: 'https://example.org/collections/cpd/series-f',
+        },
+        content: [
+          {
+            type: 'seriesOps',
+            content: [],
+          },
+          {
+            type: 'seriesBody',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Project plans and revisions for waterfront, transit, and mixed-use redevelopment projects.',
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            type: 'subseries',
+            attrs: {
+              id: 'subseries-f1',
+              title: 'Waterfront Redevelopment',
+              dates: '1949-1979',
+              refCode: 'CPD-MS-003.1',
+              extent: '98 plan sets',
               processingStatus: 'processed',
             },
             content: [
               createFileNode(
-                'file-d1-1',
-                'Interview - Conductor James Bell',
-                [createItemNode('item-oral-001', 'object', 'Audio interview discussing route safety and schedules.', '1980-05-16')],
+                'file-f1-1',
+                'Phase I Site Plans',
+                [createItemNode('item-plan-001', 'document', 'Annotated project plan showing parcel realignment and utilities.', '1956-08-03')],
                 {
-                  dates: '1980',
-                  refCode: 'RR-MS-004.1.1',
-                  extent: '1 cassette',
+                  dates: '1955-1957',
+                  refCode: 'CPD-MS-003.1.1',
+                  extent: '16 sheets',
                 },
               ),
             ],
@@ -1963,22 +2612,22 @@ function createSeriesDStub(): SeriesDoc {
           {
             type: 'subseries',
             attrs: {
-              id: 'subseries-d2',
-              title: 'Typed Transcripts',
-              dates: '1980-1992',
-              refCode: 'RR-MS-004.2',
-              extent: '14 folders',
+              id: 'subseries-f2',
+              title: 'Transit Corridor Updates',
+              dates: '1976-2005',
+              refCode: 'CPD-MS-003.2',
+              extent: '122 plan sets',
               processingStatus: 'processed',
             },
             content: [
               createFileNode(
-                'file-d2-1',
-                'Transcript - Maintenance Crew',
-                [createItemNode('item-oral-050', 'document', 'Transcript of maintenance crew group interview.', '1982-10-09')],
+                'file-f2-1',
+                'Station Integration Plan',
+                [createItemNode('item-plan-200', 'document', 'Revision package for station access and pedestrian routing.', '1996-10-14')],
                 {
-                  dates: '1982',
-                  refCode: 'RR-MS-004.2.1',
-                  extent: '34 pages',
+                  dates: '1995-1998',
+                  refCode: 'CPD-MS-003.2.1',
+                  extent: '28 sheets',
                 },
               ),
             ],

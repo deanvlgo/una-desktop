@@ -1,4 +1,4 @@
-import { type CSSProperties, type DragEvent, useMemo, useState } from 'react';
+import { type CSSProperties, type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   collectAncestorIds,
@@ -10,12 +10,22 @@ import {
 
 type PresenceUser = { id: string; name: string; color: string };
 
+type SeriesOption = {
+  docName: string;
+  title: string;
+  presenceCount: number;
+};
+
 type FindingAidHierarchyProps = {
   root: HierarchyNode;
   focusState: FocusState;
+  seriesOptions?: SeriesOption[];
+  activeSeriesDocName?: string;
+  onSelectSeries?: (docName: string) => void;
   onFocus: (id: string) => void;
   onToggleExpand: (id: string) => void;
   onMove: (draggedId: string, targetId: string, placement: 'before' | 'after') => void;
+  onMoveSeries?: (draggedDocName: string, targetDocName: string, placement: 'before' | 'after') => void;
   onIndent: (id: string) => void;
   onOutdent: (id: string) => void;
   onAddChild: (parentId: string, level: HierarchyLevel) => void;
@@ -34,6 +44,10 @@ type OutlineEntry = {
   expanded: boolean;
   isFocused: boolean;
   pathLabel: string;
+  kind: 'node' | 'seriesRef';
+  seriesDocName?: string;
+  seriesPresenceCount?: number;
+  isActiveSeries?: boolean;
 };
 
 type DropTarget = {
@@ -63,9 +77,13 @@ const LEVEL_COLORS: Record<HierarchyLevel, string> = {
 export function FindingAidHierarchy({
   root,
   focusState,
+  seriesOptions = [],
+  activeSeriesDocName,
+  onSelectSeries,
   onFocus,
   onToggleExpand,
   onMove,
+  onMoveSeries,
   onIndent,
   onOutdent,
   onAddChild,
@@ -78,10 +96,73 @@ export function FindingAidHierarchy({
     [root, focusState.focusedId],
   );
 
-  const outline = useMemo(
-    () => flattenVisibleHierarchy(root, focusState, focusedAncestors),
-    [root, focusState, focusedAncestors],
-  );
+  const outline = useMemo(() => {
+    const activeOutline = flattenVisibleHierarchy(root, focusState, focusedAncestors);
+    if (seriesOptions.length === 0 || !activeSeriesDocName) {
+      return activeOutline;
+    }
+
+    const activeRoot = activeOutline[0] ?? null;
+    const activeDescendants = activeOutline
+      .slice(1)
+      .map((entry) => ({ ...entry, seriesDocName: activeSeriesDocName }));
+
+    let hasActiveSeriesRow = false;
+    const seriesRows: OutlineEntry[] = seriesOptions.map((series, index): OutlineEntry => {
+      const isActiveSeries = series.docName === activeSeriesDocName;
+      if (isActiveSeries && activeRoot) {
+        hasActiveSeriesRow = true;
+        return {
+          ...activeRoot,
+          pathLabel: String(index + 1),
+          isActiveSeries: true,
+          seriesDocName: series.docName,
+          seriesPresenceCount: series.presenceCount,
+        };
+      }
+
+      return {
+        id: `series-ref:${series.docName}`,
+        parentId: null,
+        level: 'series',
+        depth: 0,
+        title: series.title,
+        hasChildren: true,
+        expanded: false,
+        isFocused: false,
+        pathLabel: String(index + 1),
+        kind: 'seriesRef',
+        seriesDocName: series.docName,
+        seriesPresenceCount: series.presenceCount,
+        isActiveSeries,
+      };
+    });
+
+    const stitched: OutlineEntry[] = [];
+    if (!hasActiveSeriesRow && activeRoot) {
+      const activeOptionIndex = seriesOptions.findIndex((series) => series.docName === activeSeriesDocName);
+      stitched.push({
+        ...activeRoot,
+        isActiveSeries: true,
+        seriesDocName: activeSeriesDocName,
+        seriesPresenceCount:
+          activeOptionIndex >= 0 ? seriesOptions[activeOptionIndex]?.presenceCount : activeRoot.seriesPresenceCount,
+        pathLabel: activeOptionIndex >= 0 ? String(activeOptionIndex + 1) : activeRoot.pathLabel,
+      });
+      stitched.push(...activeDescendants);
+      stitched.push(...seriesRows);
+      return stitched;
+    }
+
+    for (const row of seriesRows) {
+      stitched.push(row);
+      if (row.isActiveSeries) {
+        stitched.push(...activeDescendants);
+      }
+    }
+
+    return stitched;
+  }, [root, focusState, focusedAncestors, seriesOptions, activeSeriesDocName]);
 
   const outlineById = useMemo(() => {
     const map = new Map<string, OutlineEntry>();
@@ -121,9 +202,42 @@ export function FindingAidHierarchy({
   }, [siblingOrderByParent]);
 
   const [draggedId, setDraggedId] = useState<string | null>(null);
+  const pointerDraggedIdRef = useRef<string | null>(null);
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
   const [dropEnd, setDropEnd] = useState(false);
   const [addMenuOpenId, setAddMenuOpenId] = useState<string | null>(null);
+  const [actionMenuOpenId, setActionMenuOpenId] = useState<string | null>(null);
+
+  const beginPointerDrag = (
+    event: ReactPointerEvent,
+    nodeId: string,
+    depth: number,
+    allowDepthZero: boolean = false,
+  ) => {
+    if (depth === 0 && !allowDepthZero) {
+      return;
+    }
+
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('input, textarea, select, button, a')) {
+      return;
+    }
+
+    pointerDraggedIdRef.current = nodeId;
+    setDraggedId(nodeId);
+    setDropTarget(null);
+    setDropEnd(false);
+    setAddMenuOpenId(null);
+    setActionMenuOpenId(null);
+    event.preventDefault();
+  };
+
+  const endPointerDrag = () => {
+    pointerDraggedIdRef.current = null;
+    setDraggedId(null);
+    setDropTarget(null);
+    setDropEnd(false);
+  };
 
   const canDrop = (sourceId: string, targetId: string, placement: 'before' | 'after'): boolean => {
     if (sourceId === targetId) {
@@ -136,12 +250,37 @@ export function FindingAidHierarchy({
       return false;
     }
 
-    if (source.depth === 0) {
+    const sourceIsSeriesRow = source.level === 'series' && source.depth === 0 && Boolean(source.seriesDocName);
+    const targetIsSeriesRow = target.level === 'series' && target.depth === 0 && Boolean(target.seriesDocName);
+
+    if (sourceIsSeriesRow || targetIsSeriesRow) {
+      if (!sourceIsSeriesRow || !targetIsSeriesRow || !onMoveSeries) {
+        return false;
+      }
+
+      const key = 'root::series';
+      const siblings = siblingOrderByParent.get(key) ?? [];
+      const fromIndex = siblings.findIndex((entry) => entry.id === sourceId);
+      const targetIndex = siblings.findIndex((entry) => entry.id === targetId);
+
+      if (fromIndex < 0 || targetIndex < 0) {
+        return false;
+      }
+
+      let insertIndex = placement === 'before' ? targetIndex : targetIndex + 1;
+      if (fromIndex < insertIndex) {
+        insertIndex -= 1;
+      }
+
+      return insertIndex !== fromIndex;
+    }
+
+    if (source.kind !== 'node' || target.kind !== 'node' || source.depth === 0 || source.level !== target.level) {
       return false;
     }
 
-    if (source.parentId !== target.parentId || source.level !== target.level) {
-      return false;
+    if (source.parentId !== target.parentId) {
+      return true;
     }
 
     const key = `${source.parentId ?? 'root'}::${source.level}`;
@@ -163,7 +302,30 @@ export function FindingAidHierarchy({
 
   const moveToEndTarget = (sourceId: string): { targetId: string; placement: 'after' } | null => {
     const source = outlineById.get(sourceId);
-    if (!source || source.depth === 0) {
+    if (!source) {
+      return null;
+    }
+
+    const sourceIsSeriesRow = source.level === 'series' && source.depth === 0 && Boolean(source.seriesDocName);
+    if (sourceIsSeriesRow) {
+      if (!onMoveSeries) {
+        return null;
+      }
+
+      const siblings = siblingOrderByParent.get('root::series') ?? [];
+      if (siblings.length <= 1) {
+        return null;
+      }
+
+      const last = siblings[siblings.length - 1];
+      if (!last || last.id === sourceId) {
+        return null;
+      }
+
+      return { targetId: last.id, placement: 'after' };
+    }
+
+    if (source.kind !== 'node' || source.depth === 0) {
       return null;
     }
 
@@ -181,10 +343,138 @@ export function FindingAidHierarchy({
     return { targetId: last.id, placement: 'after' };
   };
 
-  const resolvePlacement = (event: DragEvent<HTMLDivElement>): 'before' | 'after' => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
-  };
+  const resolvePlacementFromClientY = (clientY: number, rect: DOMRect): 'before' | 'after' =>
+    clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+
+  useEffect(() => {
+    if (!draggedId) {
+      return;
+    }
+
+    const resolveDropFromPointer = (clientX: number, clientY: number): DropTarget | null => {
+      const sourceId = pointerDraggedIdRef.current ?? draggedId;
+      if (!sourceId) {
+        return null;
+      }
+
+      const hovered = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const row = hovered?.closest<HTMLElement>('[data-hierarchy-row-id]');
+      const targetId = row?.dataset.hierarchyRowId;
+      if (!row || !targetId) {
+        return null;
+      }
+
+      const placement = resolvePlacementFromClientY(clientY, row.getBoundingClientRect());
+      if (!canDrop(sourceId, targetId, placement)) {
+        return null;
+      }
+
+      return { id: targetId, placement };
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const sourceId = pointerDraggedIdRef.current ?? draggedId;
+      if (!sourceId) {
+        return;
+      }
+
+      const maybeDrop = resolveDropFromPointer(event.clientX, event.clientY);
+      if (maybeDrop) {
+        setDropEnd(false);
+        if (dropTarget?.id !== maybeDrop.id || dropTarget.placement !== maybeDrop.placement) {
+          setDropTarget(maybeDrop);
+        }
+        return;
+      }
+
+      const hovered = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+      const onEndZone = hovered?.closest('.finding-hierarchy__outline-drop-end');
+      if (onEndZone && moveToEndTarget(sourceId)) {
+        if (dropTarget) {
+          setDropTarget(null);
+        }
+        if (!dropEnd) {
+          setDropEnd(true);
+        }
+        return;
+      }
+
+      if (dropTarget) {
+        setDropTarget(null);
+      }
+      if (dropEnd) {
+        setDropEnd(false);
+      }
+    };
+
+    const handlePointerEnd = (event: PointerEvent) => {
+      const sourceId = pointerDraggedIdRef.current ?? draggedId;
+      if (!sourceId) {
+        endPointerDrag();
+        return;
+      }
+
+      const maybeDrop = resolveDropFromPointer(event.clientX, event.clientY);
+      if (maybeDrop) {
+        const sourceEntry = outlineById.get(sourceId);
+        const targetEntry = outlineById.get(maybeDrop.id);
+        const sourceIsSeriesRow =
+          sourceEntry?.level === 'series' && sourceEntry.depth === 0 && Boolean(sourceEntry.seriesDocName);
+        const targetIsSeriesRow =
+          targetEntry?.level === 'series' && targetEntry.depth === 0 && Boolean(targetEntry.seriesDocName);
+
+        if (
+          sourceIsSeriesRow &&
+          targetIsSeriesRow &&
+          sourceEntry?.seriesDocName &&
+          targetEntry?.seriesDocName &&
+          onMoveSeries
+        ) {
+          onMoveSeries(sourceEntry.seriesDocName, targetEntry.seriesDocName, maybeDrop.placement);
+        } else {
+          onMove(sourceId, maybeDrop.id, maybeDrop.placement);
+        }
+        endPointerDrag();
+        return;
+      }
+
+      if (dropEnd) {
+        const moveTarget = moveToEndTarget(sourceId);
+        if (moveTarget) {
+          const sourceEntry = outlineById.get(sourceId);
+          const targetEntry = outlineById.get(moveTarget.targetId);
+          const sourceIsSeriesRow =
+            sourceEntry?.level === 'series' && sourceEntry.depth === 0 && Boolean(sourceEntry.seriesDocName);
+          const targetIsSeriesRow =
+            targetEntry?.level === 'series' && targetEntry.depth === 0 && Boolean(targetEntry.seriesDocName);
+
+          if (
+            sourceIsSeriesRow &&
+            targetIsSeriesRow &&
+            sourceEntry?.seriesDocName &&
+            targetEntry?.seriesDocName &&
+            onMoveSeries
+          ) {
+            onMoveSeries(sourceEntry.seriesDocName, targetEntry.seriesDocName, moveTarget.placement);
+          } else {
+            onMove(sourceId, moveTarget.targetId, moveTarget.placement);
+          }
+        }
+      }
+
+      endPointerDrag();
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerEnd);
+    window.addEventListener('pointercancel', handlePointerEnd);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerEnd);
+      window.removeEventListener('pointercancel', handlePointerEnd);
+    };
+  }, [canDrop, draggedId, dropEnd, dropTarget, moveToEndTarget, onMove, onMoveSeries, outlineById]);
 
   return (
     <div className="finding-hierarchy" aria-label="Guided processing hierarchy">
@@ -205,13 +495,17 @@ export function FindingAidHierarchy({
 
         <div className="finding-hierarchy__outline-list" role="tree">
           {outline.map((entry) => {
-            const isSelected = entry.isFocused;
+            const isSeriesRef = entry.kind === 'seriesRef';
+            const isNodeEntry = entry.kind === 'node';
+            const isSeriesRow = entry.level === 'series' && entry.depth === 0;
+            const canDragRow = (isNodeEntry && entry.depth > 0) || isSeriesRow;
+            const isSelected = entry.isFocused || Boolean(entry.isActiveSeries && entry.depth === 0);
             const isDropTarget = dropTarget?.id === entry.id;
             const isDragging = draggedId === entry.id;
             const dropBefore = isDropTarget && dropTarget?.placement === 'before';
             const dropAfter = isDropTarget && dropTarget?.placement === 'after';
-            const presence = presenceByNodeId[entry.id] ?? [];
-            const isRenameable = entry.level !== 'item' && typeof onRename === 'function';
+            const presence = isNodeEntry ? presenceByNodeId[entry.id] ?? [] : [];
+            const isRenameable = isNodeEntry && entry.level !== 'item' && typeof onRename === 'function';
             const siblingMeta = siblingMetaById.get(entry.id) ?? { prevId: null, nextId: null };
             const canIndent = computeCanIndent(entry, outlineById, siblingMetaById);
             const canOutdent = computeCanOutdent(entry, outlineById);
@@ -222,45 +516,29 @@ export function FindingAidHierarchy({
                 {dropBefore ? <div className="finding-hierarchy__drop-line" aria-hidden /> : null}
 
                 <div
-                  className={`finding-hierarchy__outline-item ${isSelected ? 'is-selected' : ''} ${isDropTarget ? 'finding-hierarchy__drop-target' : ''} ${isDragging ? 'is-dragging' : ''}`}
+                  className={`finding-hierarchy__outline-item ${isSelected ? 'is-selected' : ''} ${entry.isActiveSeries ? 'is-series-active' : ''} ${isDropTarget ? 'finding-hierarchy__drop-target' : ''} ${isDragging ? 'is-dragging' : ''}`}
                   style={{ marginLeft: entry.depth * 12 }}
+                  data-hierarchy-row-id={entry.id}
                   role="treeitem"
                   aria-expanded={entry.hasChildren ? entry.expanded : undefined}
-                  onMouseDown={() => {
+                  onPointerDown={(event) => {
+                    const target = event.target as HTMLElement | null;
+                    if (target?.closest('input, textarea, select, button, a')) {
+                      return;
+                    }
+                    if (isSeriesRef) {
+                      if (entry.seriesDocName) {
+                        onSelectSeries?.(entry.seriesDocName);
+                      }
+                      setAddMenuOpenId(null);
+                      setActionMenuOpenId(null);
+                      return;
+                    }
+
                     onFocus(entry.id);
                     setAddMenuOpenId(null);
-                  }}
-                  onDragOver={(event) => {
-                    if (!draggedId) {
-                      return;
-                    }
-
-                    const placement = resolvePlacement(event);
-                    if (!canDrop(draggedId, entry.id, placement)) {
-                      return;
-                    }
-
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = 'move';
-                    setDropEnd(false);
-                    if (dropTarget?.id !== entry.id || dropTarget.placement !== placement) {
-                      setDropTarget({ id: entry.id, placement });
-                    }
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    if (!draggedId) {
-                      return;
-                    }
-
-                    const placement = resolvePlacement(event);
-                    if (canDrop(draggedId, entry.id, placement)) {
-                      onMove(draggedId, entry.id, placement);
-                    }
-
-                    setDraggedId(null);
-                    setDropTarget(null);
-                    setDropEnd(false);
+                    setActionMenuOpenId(null);
+                    beginPointerDrag(event, entry.id, entry.depth, false);
                   }}
                 >
                   <button
@@ -272,9 +550,18 @@ export function FindingAidHierarchy({
                     }
                     onClick={(event) => {
                       event.stopPropagation();
-                      if (entry.hasChildren) {
-                        onToggleExpand(entry.id);
+                      if (!entry.hasChildren) {
+                        return;
                       }
+
+                      if (isSeriesRef) {
+                        if (entry.seriesDocName) {
+                          onSelectSeries?.(entry.seriesDocName);
+                        }
+                        return;
+                      }
+
+                      onToggleExpand(entry.id);
                     }}
                     aria-label={entry.expanded ? 'Collapse node' : 'Expand node'}
                   >
@@ -292,29 +579,22 @@ export function FindingAidHierarchy({
 
                   <div
                     className={
-                      entry.depth === 0
+                      !canDragRow
                         ? 'finding-hierarchy__drag finding-hierarchy__drag--disabled'
                         : 'finding-hierarchy__drag'
                     }
-                    draggable={entry.depth > 0}
-                    onDragStart={(event) => {
-                      if (entry.depth === 0) {
-                        event.preventDefault();
+                    onPointerDown={(event) => {
+                      if (!canDragRow) {
                         return;
                       }
-
-                      setDraggedId(entry.id);
-                      setDropTarget(null);
-                      setDropEnd(false);
-                      event.dataTransfer.effectAllowed = 'move';
-                      event.dataTransfer.setData('text/plain', entry.id);
+                      event.stopPropagation();
+                      if (!isSeriesRef) {
+                        onFocus(entry.id);
+                      }
+                      setAddMenuOpenId(null);
+                      setActionMenuOpenId(null);
+                      beginPointerDrag(event, entry.id, entry.depth, isSeriesRow);
                     }}
-                    onDragEnd={() => {
-                      setDraggedId(null);
-                      setDropTarget(null);
-                      setDropEnd(false);
-                    }}
-                    onDragOver={(event) => event.preventDefault()}
                     aria-label="Drag to reorder sibling"
                     title="Drag to reorder sibling"
                   >
@@ -334,6 +614,8 @@ export function FindingAidHierarchy({
                       {isRenameable ? (
                         <input
                           value={entry.title}
+                          onFocus={() => onFocus(entry.id)}
+                          onClick={(event) => event.stopPropagation()}
                           onChange={(event) => onRename(entry.id, event.target.value)}
                         />
                       ) : (
@@ -344,6 +626,11 @@ export function FindingAidHierarchy({
                     </div>
 
                     <div className="finding-hierarchy__pill-actions">
+                      {entry.seriesPresenceCount != null ? (
+                        <span className="finding-hierarchy__series-count">
+                          {entry.seriesPresenceCount} active {entry.seriesPresenceCount === 1 ? 'user' : 'users'}
+                        </span>
+                      ) : null}
                       {presence.length > 0 ? (
                         <span className="finding-hierarchy__presence" aria-label={`${presence.length} collaborators focused here`}>
                           {presence.map((person) => (
@@ -358,11 +645,27 @@ export function FindingAidHierarchy({
                           ))}
                         </span>
                       ) : null}
-
+                      {isNodeEntry ? (
+                        <button
+                          type="button"
+                          className="finding-hierarchy__menu-trigger"
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onFocus(entry.id);
+                            setAddMenuOpenId(null);
+                            setActionMenuOpenId((current) => (current === entry.id ? null : entry.id));
+                          }}
+                          aria-label="Open row actions"
+                          aria-expanded={actionMenuOpenId === entry.id}
+                        >
+                          …
+                        </button>
+                      ) : null}
                     </div>
                   </div>
 
-                  {isSelected ? (
+                  {isNodeEntry && actionMenuOpenId === entry.id ? (
                     <div
                       className="finding-hierarchy__row-popover"
                       role="toolbar"
@@ -381,6 +684,7 @@ export function FindingAidHierarchy({
                                 onMove(entry.id, siblingMeta.prevId, 'before');
                                 onFocus(entry.id);
                                 setAddMenuOpenId(null);
+                                setActionMenuOpenId(null);
                               }
                             }}
                           >
@@ -395,6 +699,7 @@ export function FindingAidHierarchy({
                                 onMove(entry.id, siblingMeta.nextId, 'after');
                                 onFocus(entry.id);
                                 setAddMenuOpenId(null);
+                                setActionMenuOpenId(null);
                               }
                             }}
                           >
@@ -408,6 +713,7 @@ export function FindingAidHierarchy({
                               onOutdent(entry.id);
                               onFocus(entry.id);
                               setAddMenuOpenId(null);
+                              setActionMenuOpenId(null);
                             }}
                           >
                             Outdent
@@ -420,25 +726,13 @@ export function FindingAidHierarchy({
                               onIndent(entry.id);
                               onFocus(entry.id);
                               setAddMenuOpenId(null);
+                              setActionMenuOpenId(null);
                             }}
                           >
                             Indent
                           </button>
                         </>
                       ) : null}
-                      {entry.hasChildren ? (
-                        <button
-                          type="button"
-                          className="finding-hierarchy__action"
-                          onClick={() => {
-                            onToggleExpand(entry.id);
-                            setAddMenuOpenId(null);
-                          }}
-                        >
-                          {entry.expanded ? 'Collapse' : 'Expand'}
-                        </button>
-                      ) : null}
-
                       <div className="finding-hierarchy__add-wrap">
                         <button
                           type="button"
@@ -468,6 +762,7 @@ export function FindingAidHierarchy({
                                 onClick={() => {
                                   onAddChild(entry.id, level);
                                   setAddMenuOpenId(null);
+                                  setActionMenuOpenId(null);
                                 }}
                               >
                                 Add {LEVEL_LABELS[level]}
@@ -481,13 +776,14 @@ export function FindingAidHierarchy({
                         type="button"
                         className="finding-hierarchy__action finding-hierarchy__delete-btn"
                         disabled={entry.depth === 0}
-                        onClick={() => {
-                          if (entry.depth === 0) {
-                            return;
-                          }
-                          onDelete(entry.id);
-                          setAddMenuOpenId(null);
-                        }}
+                          onClick={() => {
+                            if (entry.depth === 0) {
+                              return;
+                            }
+                            onDelete(entry.id);
+                            setAddMenuOpenId(null);
+                            setActionMenuOpenId(null);
+                          }}
                       >
                         Delete
                       </button>
@@ -502,40 +798,6 @@ export function FindingAidHierarchy({
 
           <div
             className={`finding-hierarchy__outline-drop-end ${dropEnd ? 'is-drop-target' : ''}`}
-            onDragOver={(event) => {
-              if (!draggedId) {
-                return;
-              }
-
-              if (!moveToEndTarget(draggedId)) {
-                return;
-              }
-
-              event.preventDefault();
-              event.dataTransfer.dropEffect = 'move';
-              setDropTarget(null);
-              setDropEnd(true);
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              if (!draggedId) {
-                return;
-              }
-
-              const moveTarget = moveToEndTarget(draggedId);
-              if (moveTarget) {
-                onMove(draggedId, moveTarget.targetId, moveTarget.placement);
-              }
-
-              setDraggedId(null);
-              setDropTarget(null);
-              setDropEnd(false);
-            }}
-            onDragLeave={() => {
-              if (dropEnd) {
-                setDropEnd(false);
-              }
-            }}
             aria-hidden
           >
             {dropEnd ? <div className="finding-hierarchy__drop-slot" aria-hidden /> : null}
@@ -570,6 +832,8 @@ function flattenVisibleHierarchy(
       expanded,
       isFocused: focusState.focusedId === node.id,
       pathLabel: path.join('.'),
+      kind: 'node',
+      isActiveSeries: depth === 0,
     });
 
     if (!expanded) {
@@ -592,7 +856,7 @@ function computeCanIndent(
   outlineById: Map<string, OutlineEntry>,
   siblingMetaById: Map<string, SiblingMeta>,
 ): boolean {
-  if (entry.depth === 0) {
+  if (entry.kind !== 'node' || entry.depth === 0) {
     return false;
   }
 
@@ -602,7 +866,7 @@ function computeCanIndent(
   }
 
   const previous = outlineById.get(siblingMeta.prevId);
-  if (!previous) {
+  if (!previous || previous.kind !== 'node') {
     return false;
   }
 
@@ -610,17 +874,17 @@ function computeCanIndent(
 }
 
 function computeCanOutdent(entry: OutlineEntry, outlineById: Map<string, OutlineEntry>): boolean {
-  if (entry.depth <= 1 || !entry.parentId) {
+  if (entry.kind !== 'node' || entry.depth <= 1 || !entry.parentId) {
     return false;
   }
 
   const parent = outlineById.get(entry.parentId);
-  if (!parent || !parent.parentId) {
+  if (!parent || parent.kind !== 'node' || !parent.parentId) {
     return false;
   }
 
   const grandParent = outlineById.get(parent.parentId);
-  if (!grandParent) {
+  if (!grandParent || grandParent.kind !== 'node') {
     return false;
   }
 

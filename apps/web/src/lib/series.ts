@@ -247,38 +247,48 @@ export function moveSiblingHierarchyNode(
     return next;
   }
 
-  if (dragged.parent !== target.parent) {
-    return next;
-  }
-
   if (dragged.node.type !== target.node.type) {
     return next;
   }
 
-  const siblings = dragged.parent.content ?? [];
-  const fromIndex = dragged.index;
-  let toIndex = target.index + (placement === 'after' ? 1 : 0);
+  if (isPathPrefix(dragged.path, target.path)) {
+    return next;
+  }
 
-  if (fromIndex < toIndex) {
+  const sourceSiblings = dragged.parent.content ?? [];
+  const fromIndex = dragged.index;
+
+  if (fromIndex < 0 || fromIndex >= sourceSiblings.length) {
+    return next;
+  }
+
+  const destinationParent = target.parent;
+  if (!canContainHierarchyNode(destinationParent.type, dragged.node.type)) {
+    return next;
+  }
+
+  const sameParent = dragged.parent === destinationParent;
+
+  let toIndex = target.index + (placement === 'after' ? 1 : 0);
+  if (sameParent && fromIndex < toIndex) {
     toIndex -= 1;
   }
 
-  if (toIndex === fromIndex) {
+  if (sameParent && toIndex === fromIndex) {
     return next;
   }
 
-  if (fromIndex < 0 || fromIndex >= siblings.length) {
-    return next;
-  }
-
-  const [moving] = siblings.splice(fromIndex, 1);
+  const [moving] = sourceSiblings.splice(fromIndex, 1);
   if (!moving) {
     return next;
   }
 
-  const safeIndex = Math.max(0, Math.min(toIndex, siblings.length));
-  siblings.splice(safeIndex, 0, moving);
-  dragged.parent.content = siblings;
+  dragged.parent.content = sourceSiblings;
+
+  const destinationSiblings = destinationParent.content ?? [];
+  const safeIndex = Math.max(0, Math.min(toIndex, destinationSiblings.length));
+  destinationSiblings.splice(safeIndex, 0, moving);
+  destinationParent.content = destinationSiblings;
   return next;
 }
 
@@ -509,17 +519,8 @@ export function isExpandedByPolicy(
   focusState: FocusState,
   focusedAncestors: Set<UUID>,
 ): boolean {
-  if (focusState.mode !== 'focus') {
-    return true;
-  }
-
-  if (focusState.focusedId === nodeId) {
-    return true;
-  }
-
-  if (focusedAncestors.has(nodeId)) {
-    return true;
-  }
+  void focusState;
+  void focusedAncestors;
 
   return focusState.expandedIds.has(nodeId);
 }
@@ -781,6 +782,20 @@ function getNodeAtPath(root: SeriesDoc | PMNode, path: number[]): SeriesDoc | PM
     current = content[index];
   }
   return current;
+}
+
+function isPathPrefix(ancestorPath: number[], candidatePath: number[]): boolean {
+  if (ancestorPath.length >= candidatePath.length) {
+    return false;
+  }
+
+  for (let index = 0; index < ancestorPath.length; index += 1) {
+    if (ancestorPath[index] !== candidatePath[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function isTypedNode(node: SeriesDoc | PMNode): node is PMNode {

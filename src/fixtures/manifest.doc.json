@@ -49,15 +49,6 @@
             "order": 3,
             "docName": "series:col-001:series-c"
           }
-        },
-        {
-          "type": "seriesRef",
-          "attrs": {
-            "seriesId": "series-d",
-            "title": "Oral Histories",
-            "order": 4,
-            "docName": "series:col-001:series-d"
-          }
         }
       ]
     }
