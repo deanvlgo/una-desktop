@@ -12,7 +12,7 @@ import type { HocuspocusProvider } from '@hocuspocus/provider';
 import PaginationExtension, { BodyNode, HeaderFooterNode, PageNode } from 'tiptap-extension-pagination';
 
 import type { PMNode } from '../../../../src/contracts/types';
-import { formatHierarchyNodeHeading } from '../lib/hierarchyLabels';
+import { formatHierarchyNodeHeading, getHierarchyLevelLabel } from '../lib/hierarchyLabels';
 import { userInitials } from '../lib/user';
 
 type HierarchyLevel = 'series' | 'subseries' | 'file' | 'item';
@@ -30,6 +30,7 @@ type FindingAidEditorProps = {
   hierarchyHeadings: HierarchyHeading[];
   focusedHierarchyId?: string;
   focusRequestKey?: number;
+  onHierarchyTitleChange?: (hierarchyId: string, title: string) => void;
   collaboration?: {
     provider: HocuspocusProvider;
     user: { name: string; color: string; avatar?: string };
@@ -316,6 +317,159 @@ function isHierarchyHeadingNode(node: PMNode): boolean {
   return node.type === 'heading' && node.attrs?.hierarchyId != null;
 }
 
+function readNodeText(node: PMNode): string {
+  if (node.type === 'text') {
+    return String(node.text ?? '');
+  }
+
+  return (node.content ?? []).map((child) => readNodeText(child)).join('');
+}
+
+function parseDisplayHeadingToTitle(displayText: string, heading: HierarchyHeading): string | null {
+  const normalizedDisplay = displayText.trim();
+  if (normalizedDisplay.length === 0) {
+    return null;
+  }
+
+  const prefix = `${getHierarchyLevelLabel(heading.level)} ${heading.pathLabel.trim().length > 0 ? heading.pathLabel.trim() : 'I'} - `;
+  if (normalizedDisplay.startsWith(prefix)) {
+    const stripped = normalizedDisplay.slice(prefix.length).trim();
+    return stripped.length > 0 ? stripped : null;
+  }
+
+  const generic = normalizedDisplay.match(/^[A-Za-z]+\s+[IVXLCDM]+\s*-\s*(.+)$/i);
+  if (generic?.[1]) {
+    const stripped = generic[1].trim();
+    return stripped.length > 0 ? stripped : null;
+  }
+
+  return normalizedDisplay;
+}
+
+function collectHierarchyTitlePatches(content: PMNode[], hierarchyHeadings: HierarchyHeading[]): Array<{ id: string; title: string }> {
+  const headingById = new Map<string, HierarchyHeading>();
+  for (const heading of hierarchyHeadings) {
+    headingById.set(heading.id, heading);
+  }
+
+  const patches = new Map<string, string>();
+  for (const node of content) {
+    if (!isHierarchyHeadingNode(node)) {
+      continue;
+    }
+
+    const hierarchyId = String(node.attrs?.hierarchyId ?? '');
+    const heading = headingById.get(hierarchyId);
+    if (!heading) {
+      continue;
+    }
+
+    const displayText = readNodeText(node).trim();
+    if (displayText.length === 0) {
+      continue;
+    }
+
+    const expected = formatHierarchyNodeHeading(heading.level, heading.pathLabel, heading.title);
+    if (displayText === expected) {
+      continue;
+    }
+
+    const parsedTitle = parseDisplayHeadingToTitle(displayText, heading);
+    if (!parsedTitle || parsedTitle === heading.title.trim()) {
+      continue;
+    }
+
+    patches.set(hierarchyId, parsedTitle);
+  }
+
+  return Array.from(patches.entries()).map(([id, title]) => ({ id, title }));
+}
+
+function isSameHierarchyShape(previous: HierarchyHeading[], next: HierarchyHeading[]): boolean {
+  if (previous.length !== next.length) {
+    return false;
+  }
+
+  for (let index = 0; index < previous.length; index += 1) {
+    const a = previous[index];
+    const b = next[index];
+    if (!a || !b) {
+      return false;
+    }
+
+    if (a.id !== b.id || a.level !== b.level || a.depth !== b.depth || a.pathLabel !== b.pathLabel) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function applyHierarchyHeadingTitlesToEditor(
+  editor: NonNullable<ReturnType<typeof useEditor>>,
+  hierarchyHeadings: HierarchyHeading[],
+): boolean {
+  const headingById = new Map<string, HierarchyHeading>();
+  for (const heading of hierarchyHeadings) {
+    headingById.set(heading.id, heading);
+  }
+
+  const activeHeadingHierarchyId =
+    editor.isFocused &&
+    editor.state.selection.$from.parent.type.name === 'heading' &&
+    editor.state.selection.$from.parent.attrs?.hierarchyId != null
+      ? String(editor.state.selection.$from.parent.attrs.hierarchyId)
+      : null;
+
+  const patches: Array<{ from: number; to: number; text: string }> = [];
+
+  let tr = editor.state.tr;
+  let changed = false;
+
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name !== 'heading' || node.attrs?.hierarchyId == null) {
+      return true;
+    }
+
+    const hierarchyId = String(node.attrs.hierarchyId);
+    const heading = headingById.get(hierarchyId);
+    if (!heading) {
+      return true;
+    }
+    if (activeHeadingHierarchyId && hierarchyId === activeHeadingHierarchyId) {
+      return true;
+    }
+
+    const expected = formatHierarchyNodeHeading(heading.level, heading.pathLabel, heading.title);
+    const current = node.textContent ?? '';
+    if (current === expected) {
+      return true;
+    }
+
+    patches.push({
+      from: pos + 1,
+      to: pos + node.nodeSize - 1,
+      text: expected,
+    });
+    return true;
+  });
+
+  for (const patch of patches) {
+    const from = tr.mapping.map(patch.from);
+    const to = tr.mapping.map(patch.to);
+    tr = tr.insertText(patch.text, from, to);
+    changed = true;
+  }
+
+  if (changed) {
+    const mappedSelection = editor.state.selection.map(tr.doc, tr.mapping);
+    tr = tr.setSelection(mappedSelection);
+    editor.view.dispatch(tr);
+  }
+
+  return changed;
+}
+
 function removeHeadingAtSelection(editor: ReturnType<typeof useEditor>): boolean {
   if (!editor) {
     return false;
@@ -407,6 +561,7 @@ export function FindingAidEditor({
   hierarchyHeadings,
   focusedHierarchyId,
   focusRequestKey = 0,
+  onHierarchyTitleChange,
   collaboration = null,
   onCursorHierarchyFocus,
   onChange,
@@ -414,8 +569,10 @@ export function FindingAidEditor({
   const isApplyingRef = useRef(false);
   const hierarchyHeadingsRef = useRef(hierarchyHeadings);
   const onCursorHierarchyFocusRef = useRef(onCursorHierarchyFocus);
+  const onHierarchyTitleChangeRef = useRef(onHierarchyTitleChange);
   const lastReportedHierarchyIdRef = useRef<string | null>(null);
   const lastHandledFocusRequestKeyRef = useRef(0);
+  const lastPushedHeadingTitlesRef = useRef<Record<string, string>>({});
   const onChangeRef = useRef(onChange);
   const contentSignature = useMemo(() => JSON.stringify(content), [content]);
   const hierarchySignature = useMemo(() => JSON.stringify(hierarchyHeadings), [hierarchyHeadings]);
@@ -424,13 +581,20 @@ export function FindingAidEditor({
   const collaborationEnabled = Boolean(collaborationProvider && collaborationUser);
   const syncedContentSignatureRef = useRef(contentSignature);
   const syncedHierarchySignatureRef = useRef(hierarchySignature);
+  const syncedHierarchyHeadingsRef = useRef(hierarchyHeadings);
   const [sectionDepth, setSectionDepth] = useState(0);
 
   useEffect(() => {
     hierarchyHeadingsRef.current = hierarchyHeadings;
     onCursorHierarchyFocusRef.current = onCursorHierarchyFocus;
+    onHierarchyTitleChangeRef.current = onHierarchyTitleChange;
     onChangeRef.current = onChange;
-  }, [hierarchyHeadings, onCursorHierarchyFocus, onChange]);
+    const titleMap: Record<string, string> = {};
+    for (const heading of hierarchyHeadings) {
+      titleMap[heading.id] = heading.title.trim();
+    }
+    lastPushedHeadingTitlesRef.current = titleMap;
+  }, [hierarchyHeadings, onCursorHierarchyFocus, onHierarchyTitleChange, onChange]);
 
   const editor = useEditor({
     extensions: (() => {
@@ -521,6 +685,15 @@ export function FindingAidEditor({
       }
 
       const fullContent = readContentFromEditor(current.getJSON());
+      const headingPatches = collectHierarchyTitlePatches(fullContent, hierarchyHeadingsRef.current);
+      for (const patch of headingPatches) {
+        if (lastPushedHeadingTitlesRef.current[patch.id] === patch.title) {
+          continue;
+        }
+        lastPushedHeadingTitlesRef.current[patch.id] = patch.title;
+        onHierarchyTitleChangeRef.current?.(patch.id, patch.title);
+      }
+
       const normalized = normalizeHierarchySectionContent(fullContent, hierarchyHeadingsRef.current);
       const nextSignature = JSON.stringify(normalized);
       if (nextSignature === syncedContentSignatureRef.current) {
@@ -531,6 +704,10 @@ export function FindingAidEditor({
       onChangeRef.current(normalized);
     },
     onSelectionUpdate: ({ editor: current }) => {
+      if (isApplyingRef.current) {
+        return;
+      }
+
       if (!current.isFocused) {
         return;
       }
@@ -565,8 +742,20 @@ export function FindingAidEditor({
 
     const contentChanged = contentSignature !== syncedContentSignatureRef.current;
     const hierarchyChanged = hierarchySignature !== syncedHierarchySignatureRef.current;
+    const shapeChanged = !isSameHierarchyShape(syncedHierarchyHeadingsRef.current, hierarchyHeadings);
 
     if (!contentChanged && !hierarchyChanged) {
+      return;
+    }
+
+    if (hierarchyChanged && !contentChanged && !shapeChanged) {
+      isApplyingRef.current = true;
+      applyHierarchyHeadingTitlesToEditor(editor, hierarchyHeadings);
+      isApplyingRef.current = false;
+
+      syncedContentSignatureRef.current = contentSignature;
+      syncedHierarchySignatureRef.current = hierarchySignature;
+      syncedHierarchyHeadingsRef.current = hierarchyHeadings;
       return;
     }
 
@@ -575,6 +764,7 @@ export function FindingAidEditor({
     if (collaborationEnabled && !hierarchyChanged) {
       syncedContentSignatureRef.current = contentSignature;
       syncedHierarchySignatureRef.current = hierarchySignature;
+      syncedHierarchyHeadingsRef.current = hierarchyHeadings;
       return;
     }
 
@@ -584,6 +774,7 @@ export function FindingAidEditor({
 
     syncedContentSignatureRef.current = contentSignature;
     syncedHierarchySignatureRef.current = hierarchySignature;
+    syncedHierarchyHeadingsRef.current = hierarchyHeadings;
   }, [collaborationEnabled, content, contentSignature, editor, hierarchyHeadings, hierarchySignature]);
 
   useEffect(() => {

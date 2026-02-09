@@ -222,6 +222,48 @@ export function updateItemFieldValue(
   return next;
 }
 
+export function updateItemTitle(doc: SeriesDoc, itemId: UUID, title: string): SeriesDoc {
+  const normalizedTitle = title.trim();
+  if (normalizedTitle.length === 0) {
+    return doc;
+  }
+
+  const next = cloneSeriesDoc(doc);
+
+  walkNodes(next, (node) => {
+    if (node.type !== 'item' || !node.attrs || String(node.attrs.id) !== itemId) {
+      return;
+    }
+
+    const itemFields = (node.content ?? []).find((child) => child.type === 'itemFields');
+    if (!itemFields) {
+      return;
+    }
+
+    const fields = itemFields.content ?? [];
+    for (const entry of fields) {
+      if (entry.type === 'field' && String(entry.attrs?.key) === 'title') {
+        entry.attrs = { ...entry.attrs, valueType: 'text', value: normalizedTitle };
+        itemFields.content = fields;
+        return;
+      }
+    }
+
+    fields.unshift({
+      type: 'field',
+      attrs: {
+        id: `${itemId}-title`,
+        key: 'title',
+        valueType: 'text',
+        value: normalizedTitle,
+      },
+    });
+    itemFields.content = fields;
+  });
+
+  return next;
+}
+
 export function moveSiblingHierarchyNode(
   doc: SeriesDoc,
   draggedId: UUID,

@@ -51,11 +51,13 @@ import {
   moveSiblingHierarchyNode,
   nodeExists,
   outdentHierarchyNode,
+  findHierarchyNode,
   readFocusedNode,
   setSeriesBodyNodes,
   syncSeriesBodyWithHierarchy,
   transferHierarchySectionsBetweenDocs,
   updateItemFieldValue,
+  updateItemTitle,
   updateNodeMetadata,
   type FocusState,
   type HierarchyLevel,
@@ -1145,6 +1147,28 @@ export function App() {
     [updateActiveSeriesDoc],
   );
 
+  const applyFindingAidHeadingTitleChange = useCallback(
+    (nodeId: string, title: string) => {
+      const normalized = title.trim();
+      if (!activeHierarchy || normalized.length === 0) {
+        return;
+      }
+
+      const node = findHierarchyNode(activeHierarchy, nodeId);
+      if (!node) {
+        return;
+      }
+
+      if (node.level === 'item') {
+        updateActiveSeriesDoc((doc) => updateItemTitle(doc, nodeId, normalized));
+        return;
+      }
+
+      updateActiveSeriesDoc((doc) => updateNodeMetadata(doc, nodeId, { title: normalized }));
+    },
+    [activeHierarchy, updateActiveSeriesDoc],
+  );
+
   const blockSuggestions = useMemo(() => {
     if (!activeSeriesDoc) {
       return [];
@@ -1982,6 +2006,7 @@ export function App() {
                 hierarchyHeadings={hierarchyHeadings}
                 focusedHierarchyId={currentFocusState.focusedId ?? undefined}
                 focusRequestKey={focusRequestKey}
+                onHierarchyTitleChange={applyFindingAidHeadingTitleChange}
                 collaboration={
                   activeSeriesProvider
                     ? {
