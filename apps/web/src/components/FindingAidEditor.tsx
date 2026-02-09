@@ -13,6 +13,7 @@ import PaginationExtension, { BodyNode, HeaderFooterNode, PageNode } from 'tipta
 
 import type { PMNode } from '../../../../src/contracts/types';
 import { formatHierarchyNodeHeading } from '../lib/hierarchyLabels';
+import { userInitials } from '../lib/user';
 
 type HierarchyLevel = 'series' | 'subseries' | 'file' | 'item';
 
@@ -31,7 +32,7 @@ type FindingAidEditorProps = {
   focusRequestKey?: number;
   collaboration?: {
     provider: HocuspocusProvider;
-    user: { name: string; color: string };
+    user: { name: string; color: string; avatar?: string };
   } | null;
   onCursorHierarchyFocus?: (hierarchyId: string) => void;
   onChange: (nextContent: PMNode[]) => void;
@@ -414,6 +415,7 @@ export function FindingAidEditor({
   const hierarchyHeadingsRef = useRef(hierarchyHeadings);
   const onCursorHierarchyFocusRef = useRef(onCursorHierarchyFocus);
   const lastReportedHierarchyIdRef = useRef<string | null>(null);
+  const lastHandledFocusRequestKeyRef = useRef(0);
   const onChangeRef = useRef(onChange);
   const contentSignature = useMemo(() => JSON.stringify(content), [content]);
   const hierarchySignature = useMemo(() => JSON.stringify(hierarchyHeadings), [hierarchyHeadings]);
@@ -475,6 +477,35 @@ export function FindingAidEditor({
         CollaborationCursor.configure({
           provider: collaborationProvider,
           user: collaborationUser,
+          render: (user) => {
+            const caret = document.createElement('span');
+            caret.classList.add('collaboration-cursor__caret');
+
+            const label = document.createElement('span');
+            label.classList.add('collaboration-cursor__label');
+
+            const avatar = typeof user.avatar === 'string' ? user.avatar : '';
+            if (avatar.length > 0) {
+              const avatarImage = document.createElement('img');
+              avatarImage.classList.add('collaboration-cursor__avatar');
+              avatarImage.src = avatar;
+              avatarImage.alt = `${user.name} avatar`;
+              label.appendChild(avatarImage);
+            } else {
+              const initials = document.createElement('span');
+              initials.classList.add('collaboration-cursor__avatar-fallback');
+              initials.textContent = userInitials(String(user.name ?? ''));
+              label.appendChild(initials);
+            }
+
+            const name = document.createElement('span');
+            name.classList.add('collaboration-cursor__name');
+            name.textContent = String(user.name ?? '');
+            label.appendChild(name);
+            caret.appendChild(label);
+
+            return caret;
+          },
         }),
       ];
     })(),
@@ -512,7 +543,7 @@ export function FindingAidEditor({
       lastReportedHierarchyIdRef.current = hierarchyId;
       onCursorHierarchyFocusRef.current?.(hierarchyId);
     },
-  }, [collaborationEnabled, collaborationProvider, collaborationUser?.name, collaborationUser?.color]);
+  }, [collaborationEnabled, collaborationProvider, collaborationUser?.avatar, collaborationUser?.name, collaborationUser?.color]);
 
   useEffect(() => {
     if (!editor) {
@@ -560,22 +591,46 @@ export function FindingAidEditor({
       return;
     }
 
-    let headingPos: number | null = null;
-    editor.state.doc.descendants((node, pos) => {
-      if (node.type.name === 'heading' && String(node.attrs?.hierarchyId ?? '') === focusedHierarchyId) {
-        headingPos = pos;
-        return false;
-      }
-      return true;
-    });
-
-    if (headingPos == null) {
+    if (focusRequestKey <= 0 || focusRequestKey <= lastHandledFocusRequestKeyRef.current) {
       return;
     }
 
-    lastReportedHierarchyIdRef.current = focusedHierarchyId;
-    editor.chain().focus(headingPos + 1).scrollIntoView().run();
-  }, [editor, focusedHierarchyId, focusRequestKey]);
+    let cancelled = false;
+    let attempts = 0;
+
+    const tryScrollToHeading = () => {
+      if (cancelled) {
+        return;
+      }
+
+      let headingPos: number | null = null;
+      editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'heading' && String(node.attrs?.hierarchyId ?? '') === focusedHierarchyId) {
+          headingPos = pos;
+          return false;
+        }
+        return true;
+      });
+
+      if (headingPos != null) {
+        lastHandledFocusRequestKeyRef.current = focusRequestKey;
+        lastReportedHierarchyIdRef.current = focusedHierarchyId;
+        editor.chain().focus(headingPos + 1).scrollIntoView().run();
+        return;
+      }
+
+      attempts += 1;
+      if (attempts < 60) {
+        requestAnimationFrame(tryScrollToHeading);
+      }
+    };
+
+    tryScrollToHeading();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [editor, focusedHierarchyId, focusRequestKey, hierarchySignature]);
 
   const setLink = useCallback(() => {
     if (!editor) {

@@ -528,6 +528,10 @@ export function isExpandedByPolicy(
 
 export function compactSummary(node: HierarchyNode): string {
   if (node.level === 'item') {
+    const itemTitle = node.title.trim();
+    if (itemTitle.length > 0) {
+      return itemTitle;
+    }
     return String(node.itemType ?? 'item').toUpperCase();
   }
 
@@ -589,6 +593,10 @@ function nodeChildrenToHierarchy(content: PMNode[], parentPath: string): Hierarc
 
 function labelForNode(node: PMNode): string {
   if (node.type === 'item') {
+    const itemLabel = readPreferredItemLabel(node);
+    if (itemLabel) {
+      return itemLabel;
+    }
     return String(node.attrs?.itemType ?? 'item').toUpperCase();
   }
 
@@ -624,6 +632,30 @@ function readItemFields(itemNode: PMNode): ItemFieldModel[] {
   }
 
   return fields;
+}
+
+const ITEM_LABEL_FIELD_KEYS = ['title', 'name', 'caption', 'identifier', 'transcription'] as const;
+
+function readPreferredItemLabel(itemNode: PMNode): string | null {
+  const fields = readItemFields(itemNode);
+
+  for (const key of ITEM_LABEL_FIELD_KEYS) {
+    const match = fields.find((field) => field.key === key);
+    if (!match) {
+      continue;
+    }
+
+    if (typeof match.value !== 'string') {
+      continue;
+    }
+
+    const normalized = match.value.trim();
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+
+  return null;
 }
 
 function toItemFieldModel(fieldNode: PMNode): ItemFieldModel {

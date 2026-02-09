@@ -10,7 +10,7 @@ import {
 import { toRomanNumeral } from '../lib/hierarchyLabels';
 import { userInitials } from '../lib/user';
 
-type PresenceUser = { id: string; name: string; color: string };
+type PresenceUser = { id: string; name: string; color: string; avatar?: string };
 
 type SeriesOption = {
   docName: string;
@@ -25,6 +25,7 @@ type FindingAidHierarchyProps = {
   activeSeriesDocName?: string;
   onSelectSeries?: (docName: string) => void;
   onFocus: (id: string) => void;
+  onJumpToDocument?: (id: string) => void;
   onToggleExpand: (id: string) => void;
   onMove: (draggedId: string, targetId: string, placement: 'before' | 'after') => void;
   onMoveSeries?: (draggedDocName: string, targetDocName: string, placement: 'before' | 'after') => void;
@@ -83,6 +84,7 @@ export function FindingAidHierarchy({
   activeSeriesDocName,
   onSelectSeries,
   onFocus,
+  onJumpToDocument,
   onToggleExpand,
   onMove,
   onMoveSeries,
@@ -512,6 +514,7 @@ export function FindingAidHierarchy({
             const canIndent = computeCanIndent(entry, outlineById, siblingMetaById);
             const canOutdent = computeCanOutdent(entry, outlineById);
             const addChildOptions = getAddChildLevelOptions(entry.level);
+            const showJumpToDocument = isNodeEntry && entry.isFocused && typeof onJumpToDocument === 'function';
 
             return (
               <div key={entry.id} className="finding-hierarchy__entry-wrap">
@@ -638,14 +641,57 @@ export function FindingAidHierarchy({
                           {presence.map((person) => (
                             <span
                               key={person.id}
-                              className="finding-hierarchy__presence-chip"
+                              className={
+                                person.avatar
+                                  ? 'finding-hierarchy__presence-chip finding-hierarchy__presence-chip--avatar'
+                                  : 'finding-hierarchy__presence-chip'
+                              }
                               style={{ backgroundColor: person.color }}
                               title={`${person.name} focused`}
                             >
-                              {userInitials(person.name)}
+                              {person.avatar ? (
+                                <img
+                                  src={person.avatar}
+                                  alt={`${person.name} avatar`}
+                                  className="finding-hierarchy__presence-avatar"
+                                />
+                              ) : (
+                                userInitials(person.name)
+                              )}
                             </span>
                           ))}
                         </span>
+                      ) : null}
+                      {showJumpToDocument ? (
+                        <button
+                          type="button"
+                          className="finding-hierarchy__view-trigger"
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onFocus(entry.id);
+                            onJumpToDocument?.(entry.id);
+                            setAddMenuOpenId(null);
+                            setActionMenuOpenId(null);
+                          }}
+                          aria-label="Go to this level in finding aid"
+                          title="Go to section in finding aid"
+                        >
+                          <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <circle
+                              cx="12"
+                              cy="12"
+                              r="6.3"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1.75"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                            <circle cx="12" cy="12" r="2.1" fill="none" stroke="currentColor" strokeWidth="1.75" />
+                            <path d="M12 3.5V6M12 18V20.5M3.5 12H6M18 12H20.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                          </svg>
+                        </button>
                       ) : null}
                       {isNodeEntry ? (
                         <button

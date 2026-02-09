@@ -15,7 +15,7 @@ type HierarchyRailProps = {
   focusState: FocusState;
   onFocus: (id: string) => void;
   onToggleExpand: (id: string) => void;
-  presenceByNodeId?: Record<string, Array<{ id: string; name: string; color: string }>>;
+  presenceByNodeId?: Record<string, Array<{ id: string; name: string; color: string; avatar?: string }>>;
 };
 
 type LevelConfig = {
@@ -73,7 +73,7 @@ type HierarchyRowProps = {
   focusedAncestors: Set<string>;
   onFocus: (id: string) => void;
   onToggleExpand: (id: string) => void;
-  presenceByNodeId: Record<string, Array<{ id: string; name: string; color: string }>>;
+  presenceByNodeId: Record<string, Array<{ id: string; name: string; color: string; avatar?: string }>>;
 };
 
 function HierarchyRow({
@@ -151,11 +151,17 @@ function HierarchyRow({
               {presence.map((user) => (
                 <span
                   key={user.id}
-                  className="tree-node__presence-chip"
+                  className={
+                    user.avatar ? 'tree-node__presence-chip tree-node__presence-chip--avatar' : 'tree-node__presence-chip'
+                  }
                   style={{ backgroundColor: user.color }}
                   title={`${user.name} focused`}
                 >
-                  {userInitials(user.name)}
+                  {user.avatar ? (
+                    <img src={user.avatar} alt={`${user.name} avatar`} className="tree-node__presence-avatar" />
+                  ) : (
+                    userInitials(user.name)
+                  )}
                 </span>
               ))}
             </span>

@@ -63,6 +63,12 @@ import {
   type ItemFieldModel,
 } from './lib/series';
 import { formatHierarchyNodeHeading, getHierarchyLevelLabel, toRomanNumeral } from './lib/hierarchyLabels';
+import {
+  CHARACTER_PROFILES,
+  DEFAULT_CHARACTER_KEY,
+  getCharacterProfileByKey,
+  type CharacterProfile,
+} from './lib/characters';
 import { userInitials } from './lib/user';
 import { CollabClient, buildCollabSeeds } from './lib/collab';
 
@@ -91,11 +97,19 @@ type CmsFieldSpec = {
   multiline?: boolean;
 };
 
-type PresenceMap = Record<string, Array<{ id: string; name: string; color: string }>>;
+type LocalUser = {
+  id: string;
+  name: string;
+  color: string;
+  avatar: string;
+};
+
+type PresenceMap = Record<string, Array<{ id: string; name: string; color: string; avatar?: string }>>;
 type CatalogCursorPresence = {
   id: string;
   name: string;
   color: string;
+  avatar?: string;
   position: number | null;
 };
 type CatalogCursorByField = Record<string, CatalogCursorPresence[]>;
@@ -151,8 +165,47 @@ const CMS_FIELDS: CmsFieldSpec[] = [
   },
 ];
 
-const COLLAB_WS_URL = (import.meta.env.VITE_HOCUSPOCUS_URL as string | undefined) ?? 'ws://127.0.0.1:1234';
+function defaultCollabWsUrl(): string {
+  if (typeof window === 'undefined') {
+    return 'ws://127.0.0.1:1234';
+  }
+
+  const host = window.location.hostname;
+  const port = window.location.port;
+  const localDevHost = host === 'localhost' || host === '127.0.0.1';
+  if (localDevHost && (port === '5173' || port === '4173' || port.length === 0)) {
+    return 'ws://127.0.0.1:1234';
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${protocol}://${window.location.host}/collab/`;
+}
+
+function defaultCollabEnabled(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const query = new URLSearchParams(window.location.search).get('collab');
+  if (query != null) {
+    return query !== '0';
+  }
+
+  const host = window.location.hostname;
+  const localDevHost = host === 'localhost' || host === '127.0.0.1';
+  if (localDevHost) {
+    // Local dev should not spam failed websocket retries unless explicitly enabled.
+    return false;
+  }
+
+  return true;
+}
+
+const COLLAB_WS_URL = (import.meta.env.VITE_HOCUSPOCUS_URL as string | undefined) ?? defaultCollabWsUrl();
 const USER_COLOR_PALETTE = ['#ff5757', '#3b82f6', '#059669', '#a855f7', '#d97706', '#0f766e'];
+const USER_ID_STORAGE_KEY = 'archival-editor:user-id';
+const USER_NAME_STORAGE_KEY = 'archival-editor:user-name';
+const USER_CHARACTER_STORAGE_KEY = 'archival-editor:user-character';
 
 function pickUserColor(seed: string): string {
   if (seed.length === 0) {
@@ -167,36 +220,77 @@ function pickUserColor(seed: string): string {
   return USER_COLOR_PALETTE[hash % USER_COLOR_PALETTE.length] ?? USER_COLOR_PALETTE[0];
 }
 
-function createLocalUser(): { id: string; name: string; color: string } {
+function readStoredCharacterKey(): string | null {
   if (typeof window === 'undefined') {
-    return { id: 'user-local', name: 'Archivist Reviewer', color: USER_COLOR_PALETTE[0] };
+    return null;
+  }
+
+  const storedKey = window.sessionStorage.getItem(USER_CHARACTER_STORAGE_KEY);
+  if (!storedKey) {
+    return null;
+  }
+
+  return getCharacterProfileByKey(storedKey)?.key ?? null;
+}
+
+function createLocalUser(selectedCharacterKey: string, persistSelection: boolean): LocalUser {
+  const selectedCharacter =
+    getCharacterProfileByKey(selectedCharacterKey) ?? getCharacterProfileByKey(DEFAULT_CHARACTER_KEY);
+
+  if (!selectedCharacter) {
+    throw new Error('No character profiles configured.');
+  }
+
+  if (typeof window === 'undefined') {
+    return {
+      id: 'user-local',
+      name: selectedCharacter.name,
+      color: USER_COLOR_PALETTE[0],
+      avatar: selectedCharacter.avatar,
+    };
+  }
+
+  if (!persistSelection) {
+    return {
+      id: 'user-pending',
+      name: selectedCharacter.name,
+      color: USER_COLOR_PALETTE[0],
+      avatar: selectedCharacter.avatar,
+    };
   }
 
   const params = new URLSearchParams(window.location.search);
   const queryName = params.get('user')?.trim();
-  const storedId = window.sessionStorage.getItem('archival-editor:user-id');
-  const storedName = window.sessionStorage.getItem('archival-editor:user-name');
+  const storedId = window.sessionStorage.getItem(USER_ID_STORAGE_KEY);
+  const storedName = window.sessionStorage.getItem(USER_NAME_STORAGE_KEY);
   const id = storedId && storedId.length > 0 ? storedId : crypto.randomUUID();
-  const name = queryName && queryName.length > 0 ? queryName : storedName && storedName.length > 0 ? storedName : 'Archivist Reviewer';
+  const name =
+    queryName && queryName.length > 0
+      ? queryName
+      : storedName && storedName.length > 0
+        ? storedName
+        : selectedCharacter.name;
 
-  window.sessionStorage.setItem('archival-editor:user-id', id);
-  window.sessionStorage.setItem('archival-editor:user-name', name);
+  window.sessionStorage.setItem(USER_ID_STORAGE_KEY, id);
+  window.sessionStorage.setItem(USER_NAME_STORAGE_KEY, name);
+  window.sessionStorage.setItem(USER_CHARACTER_STORAGE_KEY, selectedCharacter.key);
 
   return {
     id,
     name,
     color: pickUserColor(id),
+    avatar: selectedCharacter.avatar,
   };
 }
 
-const LOCAL_USER = createLocalUser();
-const LOCAL_USER_INITIALS = userInitials(LOCAL_USER.name);
 const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
 
 export function App() {
+  const [selectedCharacterKey, setSelectedCharacterKey] = useState<string | null>(() => readStoredCharacterKey());
   const [workspace, setWorkspace] = useState<WorkspaceState>(() => createInitialWorkspace());
   const [focusStateByDoc, setFocusStateByDoc] = useState<FocusStateMap>({});
   const [focusRequestKey, setFocusRequestKey] = useState(0);
+  const [pendingDocumentJump, setPendingDocumentJump] = useState<{ id: string; docName: string } | null>(null);
   const [railPanelMode, setRailPanelMode] = useState<RailPanelMode>('collections');
   const [collectionSearch, setCollectionSearch] = useState('');
   const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null);
@@ -220,12 +314,17 @@ export function App() {
   const collabClientRef = useRef<CollabClient | null>(null);
   const applyingRemoteWorkspaceRef = useRef(false);
   const lastFocusedSeriesDocRef = useRef<string | null>(null);
+  const hasCharacterSelected = selectedCharacterKey != null;
+  const localUser = useMemo(
+    () => createLocalUser(selectedCharacterKey ?? DEFAULT_CHARACTER_KEY, hasCharacterSelected),
+    [hasCharacterSelected, selectedCharacterKey],
+  );
   const collabEnabled = useMemo(() => {
-    if (typeof window === 'undefined') {
+    if (typeof window === 'undefined' || !hasCharacterSelected) {
       return false;
     }
-    return new URLSearchParams(window.location.search).get('collab') !== '0';
-  }, []);
+    return defaultCollabEnabled();
+  }, [hasCharacterSelected]);
 
   const activeManifestDoc = useMemo(
     () => workspace.manifestsByCollectionId[workspace.activeCollectionId] ?? null,
@@ -526,6 +625,7 @@ export function App() {
         id: state.user.id,
         name: state.user.name,
         color: state.user.color,
+        avatar: state.user.avatar,
         position: state.catalogCursor.position,
       });
       nextCatalogCursorByField[state.catalogCursor.fieldId] = chips;
@@ -543,7 +643,7 @@ export function App() {
 
     const collab = new CollabClient({
       url: COLLAB_WS_URL,
-      user: LOCAL_USER,
+      user: localUser,
       onDocChanged: applyWorkspaceFromCollab,
       onPresenceChanged: refreshPresenceFromCollab,
     });
@@ -572,7 +672,7 @@ export function App() {
       collab.disconnectAll();
       collabClientRef.current = null;
     };
-  }, [applyWorkspaceFromCollab, collabEnabled, refreshPresenceFromCollab]);
+  }, [applyWorkspaceFromCollab, collabEnabled, localUser, refreshPresenceFromCollab]);
 
   useEffect(() => {
     if (!collabEnabled) {
@@ -643,9 +743,9 @@ export function App() {
     }
 
     setPresenceByNodeId({
-      [focusedId]: [LOCAL_USER],
+      [focusedId]: [localUser],
     });
-  }, [collabEnabled, currentFocusState, refreshPresenceFromCollab, workspace.activeSeriesDocName]);
+  }, [collabEnabled, currentFocusState, localUser, refreshPresenceFromCollab, workspace.activeSeriesDocName]);
 
   useEffect(() => {
     if (collabEnabled && collabClientRef.current) {
@@ -890,10 +990,47 @@ export function App() {
         focusedId: id,
         expandedIds: new Set(state.expandedIds),
       }));
-      setFocusRequestKey((value) => value + 1);
     },
     [updateCurrentFocusState],
   );
+
+  const jumpToHierarchyNodeInDocument = useCallback(
+    (id: string) => {
+      updateCurrentFocusState((state) => ({
+        ...state,
+        focusedId: id,
+        mode: 'document',
+        expandedIds: new Set(state.expandedIds),
+      }));
+      setPendingDocumentJump({
+        id,
+        docName: workspace.activeSeriesDocName,
+      });
+    },
+    [updateCurrentFocusState, workspace.activeSeriesDocName],
+  );
+
+  useEffect(() => {
+    if (!pendingDocumentJump) {
+      return;
+    }
+
+    if (pendingDocumentJump.docName !== workspace.activeSeriesDocName) {
+      setPendingDocumentJump(null);
+      return;
+    }
+
+    if (!currentFocusState) {
+      return;
+    }
+
+    if (currentFocusState.mode !== 'document' || currentFocusState.focusedId !== pendingDocumentJump.id) {
+      return;
+    }
+
+    setFocusRequestKey((value) => value + 1);
+    setPendingDocumentJump(null);
+  }, [currentFocusState, pendingDocumentJump, workspace.activeSeriesDocName]);
 
   const focusHierarchyNodeFromDocument = useCallback(
     (id: string) => {
@@ -1048,7 +1185,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [draggedDocName, targetDocName],
         suggestionIds: [],
@@ -1056,7 +1193,7 @@ export function App() {
         result: 'ok',
       });
     },
-    [activeManifestDoc, appendActionLog],
+    [activeManifestDoc, appendActionLog, localUser.id],
   );
 
   const applyBlockSuggestionDecision = useCallback(
@@ -1142,7 +1279,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames,
         suggestionIds: [sid],
@@ -1152,7 +1289,7 @@ export function App() {
         errorMessage: reason,
       });
     },
-    [appendActionLog, blockSuggestions, workspace],
+    [appendActionLog, blockSuggestions, localUser.id, workspace],
   );
 
   const applyGroupDecision = useCallback(
@@ -1187,7 +1324,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: groupedSuggestions.map((entry) => entry.sid),
@@ -1200,7 +1337,7 @@ export function App() {
             : undefined,
       });
     },
-    [applyBlockSuggestionDecision, appendActionLog, blockSuggestions, workspace],
+    [applyBlockSuggestionDecision, appendActionLog, blockSuggestions, localUser.id, workspace],
   );
 
   const applyInlineSuggestionDecision = useCallback(
@@ -1215,7 +1352,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [sid],
@@ -1223,7 +1360,7 @@ export function App() {
         result: 'ok',
       });
     },
-    [appendActionLog, updateActiveSeriesDoc, workspace.activeSeriesDocName],
+    [appendActionLog, localUser.id, updateActiveSeriesDoc, workspace.activeSeriesDocName],
   );
 
   const applyManualHierarchyMove = useCallback(
@@ -1235,7 +1372,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -1243,7 +1380,7 @@ export function App() {
         result: 'ok',
       });
     },
-    [appendActionLog, focusHierarchyNode, updateActiveSeriesDoc, workspace.activeSeriesDocName],
+    [appendActionLog, focusHierarchyNode, localUser.id, updateActiveSeriesDoc, workspace.activeSeriesDocName],
   );
 
   const applyManualHierarchyIndent = useCallback(
@@ -1252,7 +1389,7 @@ export function App() {
       focusHierarchyNode(nodeId);
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -1260,7 +1397,7 @@ export function App() {
         result: 'ok',
       });
     },
-    [appendActionLog, focusHierarchyNode, updateActiveSeriesDoc, workspace.activeSeriesDocName],
+    [appendActionLog, focusHierarchyNode, localUser.id, updateActiveSeriesDoc, workspace.activeSeriesDocName],
   );
 
   const applyManualHierarchyOutdent = useCallback(
@@ -1269,7 +1406,7 @@ export function App() {
       focusHierarchyNode(nodeId);
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -1277,7 +1414,7 @@ export function App() {
         result: 'ok',
       });
     },
-    [appendActionLog, focusHierarchyNode, updateActiveSeriesDoc, workspace.activeSeriesDocName],
+    [appendActionLog, focusHierarchyNode, localUser.id, updateActiveSeriesDoc, workspace.activeSeriesDocName],
   );
 
   const applyManualHierarchyAddChild = useCallback(
@@ -1293,7 +1430,7 @@ export function App() {
       focusHierarchyNode(insertedId);
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -1301,7 +1438,7 @@ export function App() {
         result: 'ok',
       });
     },
-    [appendActionLog, focusHierarchyNode, updateActiveSeriesDoc, workspace.activeSeriesDocName],
+    [appendActionLog, focusHierarchyNode, localUser.id, updateActiveSeriesDoc, workspace.activeSeriesDocName],
   );
 
   const applyManualHierarchyDelete = useCallback(
@@ -1313,7 +1450,7 @@ export function App() {
       }
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -1321,7 +1458,7 @@ export function App() {
         result: 'ok',
       });
     },
-    [activeHierarchy, appendActionLog, focusHierarchyNode, updateActiveSeriesDoc, workspace.activeSeriesDocName],
+    [activeHierarchy, appendActionLog, focusHierarchyNode, localUser.id, updateActiveSeriesDoc, workspace.activeSeriesDocName],
   );
 
   const stageCrossSeriesMoveProposal = useCallback(() => {
@@ -1340,7 +1477,7 @@ export function App() {
       sourceDoc,
       targetDoc,
       sid,
-      author: LOCAL_USER.id,
+      author: localUser.id,
       createdAt: Date.now(),
       payload: {
         source: {
@@ -1370,14 +1507,14 @@ export function App() {
 
     appendActionLog({
       opId: crypto.randomUUID(),
-      userId: LOCAL_USER.id,
+      userId: localUser.id,
       createdAt: Date.now(),
       docNames: [SERIES_A_DOC_NAME, SERIES_B_DOC_NAME],
       suggestionIds: [sid],
       promptSummary: 'DEBUG STAGE MOVE file-a2 -> subseries-b2',
       result: 'ok',
     });
-  }, [appendActionLog, workspace.activeCollectionId, workspace.seriesDocs]);
+  }, [appendActionLog, localUser.id, workspace.activeCollectionId, workspace.seriesDocs]);
 
   const canStagePrimaryDebugMove = workspace.activeCollectionId === PRIMARY_COLLECTION_ID;
 
@@ -1404,6 +1541,26 @@ export function App() {
     });
     setExportPreview(JSON.stringify(doc, null, 2));
   }, [activeManifestDoc, workspace.seriesDocs]);
+
+  const selectCharacterProfile = useCallback((profile: CharacterProfile) => {
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.setItem(USER_CHARACTER_STORAGE_KEY, profile.key);
+      const storedName = window.sessionStorage.getItem(USER_NAME_STORAGE_KEY);
+      if (!storedName || storedName.trim().length === 0) {
+        window.sessionStorage.setItem(USER_NAME_STORAGE_KEY, profile.name);
+      }
+    }
+    setSelectedCharacterKey(profile.key);
+  }, []);
+
+  if (!hasCharacterSelected) {
+    return (
+      <CharacterPicker
+        profiles={CHARACTER_PROFILES}
+        onSelect={selectCharacterProfile}
+      />
+    );
+  }
 
   if (!activeManifestDoc || !activeSeriesDoc || !activeHierarchy || !currentFocusState) {
     return <div className="app-shell">No active series document loaded.</div>;
@@ -1448,7 +1605,13 @@ export function App() {
         <div className="header-actions">
           <p className="header-actions__institution">{activeInstitutionName}</p>
           <button type="button" className="header-user" title="Logged in user (placeholder)">
-            <span className="header-user__avatar">{LOCAL_USER_INITIALS}</span>
+            <span className="header-user__avatar">
+              {localUser.avatar ? (
+                <img src={localUser.avatar} alt={`${localUser.name} avatar`} className="header-user__avatar-image" />
+              ) : (
+                userInitials(localUser.name)
+              )}
+            </span>
           </button>
         </div>
       </header>
@@ -1657,6 +1820,7 @@ export function App() {
                   onSelectSeries={openSeriesInHierarchy}
                   presenceByNodeId={presenceByNodeId}
                   onFocus={focusHierarchyNode}
+                  onJumpToDocument={jumpToHierarchyNodeInDocument}
                   onToggleExpand={(id) =>
                     updateCurrentFocusState((state) => {
                       const expandedIds = new Set(state.expandedIds);
@@ -1772,8 +1936,9 @@ export function App() {
                     ? {
                         provider: activeSeriesProvider,
                         user: {
-                          name: LOCAL_USER.name,
-                          color: LOCAL_USER.color,
+                          name: localUser.name,
+                          color: localUser.color,
+                          avatar: localUser.avatar,
                         },
                       }
                     : null
@@ -2111,6 +2276,38 @@ export function App() {
   );
 }
 
+type CharacterPickerProps = {
+  profiles: CharacterProfile[];
+  onSelect: (profile: CharacterProfile) => void;
+};
+
+function CharacterPicker({ profiles, onSelect }: CharacterPickerProps) {
+  return (
+    <div className="character-picker">
+      <section className="character-picker__card" aria-label="Choose character">
+        <p className="character-picker__kicker">Una Collaborative Editor</p>
+        <h1 className="character-picker__title">Choose your archivist</h1>
+        <p className="character-picker__hint">Select an archivist avatar to enter the shared finding aid workspace.</p>
+        <div className="character-picker__grid">
+          {profiles.map((profile) => (
+            <button
+              key={profile.key}
+              type="button"
+              className="character-picker__option"
+              onClick={() => onSelect(profile)}
+            >
+              <span className="character-picker__avatar-wrap">
+                <img src={profile.avatar} alt={`${profile.name} avatar`} className="character-picker__avatar" />
+              </span>
+              <span className="character-picker__name">{profile.name}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 type FieldInputProps = {
   field: ItemFieldModel;
   fieldId: string;
@@ -2351,7 +2548,23 @@ function CatalogCollaborativeTextInput({
               style={{ left: `${entry.left}px`, color: entry.color }}
               title={`${entry.name} editing`}
             >
-              <span className="catalog-cursor-field__caret-label">{userInitials(entry.name)}</span>
+              <span
+                className={
+                  entry.avatar
+                    ? 'catalog-cursor-field__caret-label catalog-cursor-field__caret-label--avatar'
+                    : 'catalog-cursor-field__caret-label'
+                }
+              >
+                {entry.avatar ? (
+                  <img
+                    src={entry.avatar}
+                    alt={`${entry.name} avatar`}
+                    className="catalog-cursor-field__caret-avatar"
+                  />
+                ) : (
+                  userInitials(entry.name)
+                )}
+              </span>
             </span>
           ))}
         </div>
@@ -2424,7 +2637,23 @@ function CatalogCollaborativeTextarea({
               style={{ left: `${entry.left}px`, top: `${entry.top}px`, color: entry.color }}
               title={`${entry.name} editing`}
             >
-              <span className="catalog-cursor-field__caret-label">{userInitials(entry.name)}</span>
+              <span
+                className={
+                  entry.avatar
+                    ? 'catalog-cursor-field__caret-label catalog-cursor-field__caret-label--avatar'
+                    : 'catalog-cursor-field__caret-label'
+                }
+              >
+                {entry.avatar ? (
+                  <img
+                    src={entry.avatar}
+                    alt={`${entry.name} avatar`}
+                    className="catalog-cursor-field__caret-avatar"
+                  />
+                ) : (
+                  userInitials(entry.name)
+                )}
+              </span>
             </span>
           ))}
         </div>
@@ -2444,11 +2673,22 @@ function CatalogPresenceBadges({ presence }: { presence: CatalogCursorPresence[]
       {presence.slice(0, 3).map((entry) => (
         <span
           key={entry.id}
-          className="catalog-presence-badges__chip"
-          style={{ backgroundColor: entry.color }}
+          className={
+            entry.avatar
+              ? 'catalog-presence-badges__chip catalog-presence-badges__chip--avatar'
+              : 'catalog-presence-badges__chip'
+          }
+          style={{
+            backgroundColor: entry.avatar ? '#ffffff' : entry.color,
+            borderColor: entry.color,
+          }}
           title={`${entry.name} editing this field`}
         >
-          {userInitials(entry.name)}
+          {entry.avatar ? (
+            <img src={entry.avatar} alt={`${entry.name} avatar`} className="catalog-presence-badges__avatar" />
+          ) : (
+            userInitials(entry.name)
+          )}
         </span>
       ))}
     </span>
@@ -2977,6 +3217,15 @@ function createSeriesAStub(): SeriesDoc {
                       {
                         type: 'itemFields',
                         content: [
+                          {
+                            type: 'field',
+                            attrs: {
+                              id: 'field-ledger-0',
+                              key: 'title',
+                              valueType: 'text',
+                              value: 'Springfield Dispatch Ledger',
+                            },
+                          },
                           {
                             type: 'field',
                             attrs: {

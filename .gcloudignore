@@ -1,0 +1,17 @@
+# Explicit Cloud Build ignore rules.
+# Keep this separate from .gitignore so required build files are uploaded.
+
+.git
+.gitignore
+.DS_Store
+node_modules
+**/node_modules
+dist
+build
+coverage
+*.tsbuildinfo
+.env
+.env.*
+
+# Required by Dockerfile build stage.
+!package-lock.json

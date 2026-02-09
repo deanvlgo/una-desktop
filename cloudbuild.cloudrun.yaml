@@ -1,0 +1,55 @@
+# Cloud Build -> Cloud Run deploy for archival editor (single-container)
+substitutions:
+  _REGION: us-central1
+  _SERVICE: una-editor
+  _BASIC_AUTH_USER_SECRET: una-editor-basic-auth-user
+  _BASIC_AUTH_PASSWORD_SECRET: una-editor-basic-auth-password
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/docker/${_SERVICE}
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/docker/${_SERVICE}
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/docker/${_SERVICE}
+      - --region
+      - ${_REGION}
+      - --platform
+      - managed
+      - --port
+      - "8080"
+      - --timeout
+      - "3600"
+      - --concurrency
+      - "80"
+      - --min-instances
+      - "0"
+      - --max-instances
+      - "3"
+      - --allow-unauthenticated
+      - --set-env-vars
+      - >-
+        REQUIRE_BASIC_AUTH=1,
+        HOCUSPOCUS_HOST=127.0.0.1,
+        HOCUSPOCUS_PORT=1234
+      - --set-secrets
+      - >-
+        BASIC_AUTH_USER=${_BASIC_AUTH_USER_SECRET}:latest,
+        BASIC_AUTH_PASSWORD=${_BASIC_AUTH_PASSWORD_SECRET}:latest
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/docker/${_SERVICE}
