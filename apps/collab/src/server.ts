@@ -10,6 +10,7 @@ const DEFAULT_HOST = '127.0.0.1';
 
 const port = Number(process.env.HOCUSPOCUS_PORT ?? DEFAULT_PORT);
 const host = process.env.HOCUSPOCUS_HOST ?? DEFAULT_HOST;
+const collabAuthToken = String(process.env.COLLAB_AUTH_TOKEN ?? '').trim();
 
 const dataDir =
   process.env.HOCUSPOCUS_DATA_DIR != null
@@ -54,6 +55,15 @@ async function main(): Promise<void> {
   const server = Server.configure({
     port,
     address: host,
+    async onAuthenticate(data) {
+      if (collabAuthToken.length === 0) {
+        return;
+      }
+
+      if (String(data.token ?? '') !== collabAuthToken) {
+        throw new Error('Unauthorized');
+      }
+    },
     async onLoadDocument(data) {
       return loadDocument(data.documentName);
     },

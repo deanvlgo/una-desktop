@@ -5,9 +5,15 @@ PORT="${PORT:-8080}"
 HOCUSPOCUS_HOST="${HOCUSPOCUS_HOST:-127.0.0.1}"
 HOCUSPOCUS_PORT="${HOCUSPOCUS_PORT:-1234}"
 REQUIRE_BASIC_AUTH="${REQUIRE_BASIC_AUTH:-0}"
+COLLAB_AUTH_TOKEN="${COLLAB_AUTH_TOKEN:-}"
 
 if [[ "$REQUIRE_BASIC_AUTH" == "1" ]] && [[ -z "${BASIC_AUTH_USER:-}" || -z "${BASIC_AUTH_PASSWORD:-}" ]]; then
   echo "[entrypoint] REQUIRE_BASIC_AUTH=1 but BASIC_AUTH_USER/BASIC_AUTH_PASSWORD are missing"
+  exit 1
+fi
+
+if [[ "$REQUIRE_BASIC_AUTH" == "1" ]] && [[ -z "${COLLAB_AUTH_TOKEN:-}" ]]; then
+  echo "[entrypoint] REQUIRE_BASIC_AUTH=1 but COLLAB_AUTH_TOKEN is missing"
   exit 1
 fi
 
@@ -23,8 +29,8 @@ else
   AUTH_BLOCK=""
 fi
 
-export PORT HOCUSPOCUS_PORT AUTH_BLOCK
-envsubst '${PORT} ${HOCUSPOCUS_PORT} ${AUTH_BLOCK}' \
+export PORT HOCUSPOCUS_PORT AUTH_BLOCK COLLAB_AUTH_TOKEN
+envsubst '${PORT} ${HOCUSPOCUS_PORT} ${AUTH_BLOCK} ${COLLAB_AUTH_TOKEN}' \
   < /app/deploy/cloud-run/nginx.conf.template \
   > /etc/nginx/conf.d/default.conf
 

@@ -29,7 +29,7 @@ docker run --rm -p 8080:8080 una-editor:local
 
 Open `http://localhost:8080`.
 
-## 2. Create shared username/password secrets
+## 2. Create shared username/password secrets + collab token
 
 Use Secret Manager so creds are not committed to source or plain env vars:
 
@@ -39,6 +39,9 @@ printf 'shared_editor_user' | gcloud secrets versions add una-editor-basic-auth-
 
 printf 'change-this-strong-password' | gcloud secrets create una-editor-basic-auth-password --data-file=- || \
 printf 'change-this-strong-password' | gcloud secrets versions add una-editor-basic-auth-password --data-file=-
+
+printf 'change-this-long-random-collab-token' | gcloud secrets create una-editor-collab-token --data-file=- || \
+printf 'change-this-long-random-collab-token' | gcloud secrets versions add una-editor-collab-token --data-file=-
 ```
 
 Grant the Cloud Run runtime service account access to those secrets:
@@ -58,6 +61,10 @@ gcloud secrets add-iam-policy-binding una-editor-basic-auth-user \
 gcloud secrets add-iam-policy-binding una-editor-basic-auth-password \
   --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/secretmanager.secretAccessor"
+
+gcloud secrets add-iam-policy-binding una-editor-collab-token \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/secretmanager.secretAccessor"
 ```
 
 ## 3. Build + deploy with Cloud Build
@@ -69,7 +76,10 @@ gcloud builds submit --config cloudbuild.cloudrun.yaml \
 
 This build config enables:
 - `REQUIRE_BASIC_AUTH=1`
-- Cloud Run secret injection for `BASIC_AUTH_USER` and `BASIC_AUTH_PASSWORD`
+- Cloud Run secret injection for:
+  - `BASIC_AUTH_USER`
+  - `BASIC_AUTH_PASSWORD`
+  - `COLLAB_AUTH_TOKEN`
 
 ## 4. Map the service to editor.historiq.com
 
@@ -98,7 +108,9 @@ After DNS propagation, Cloud Run provisions certs and serves on `https://editor.
 Recommended for IP protection:
 - For shared password access, Cloud Run must be `--allow-unauthenticated`, and Nginx Basic Auth becomes the gate.
 - This config already does that and requires auth via `REQUIRE_BASIC_AUTH=1`.
-- Nginx enforces Basic Auth on app routes and `/collab/`.
+- Nginx enforces Basic Auth on app routes and `/collab-token`.
+- `/collab/` itself is exempt from Basic Auth to avoid Safari websocket credential loops.
+- Hocuspocus enforces `COLLAB_AUTH_TOKEN`, fetched by the app from `/collab-token` after Basic Auth.
 
 ## 6. Frontend collab URL behavior
 

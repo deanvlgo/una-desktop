@@ -201,6 +201,29 @@ function defaultCollabEnabled(): boolean {
   return true;
 }
 
+async function fetchCollabAuthToken(): Promise<string | null> {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  try {
+    const response = await fetch('/collab-token', {
+      method: 'GET',
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const token = (await response.text()).trim();
+    return token.length > 0 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
 const COLLAB_WS_URL = (import.meta.env.VITE_HOCUSPOCUS_URL as string | undefined) ?? defaultCollabWsUrl();
 const USER_COLOR_PALETTE = ['#ff5757', '#3b82f6', '#059669', '#a855f7', '#d97706', '#0f766e'];
 const USER_ID_STORAGE_KEY = 'archival-editor:user-id';
@@ -291,6 +314,8 @@ export function App() {
   const [focusStateByDoc, setFocusStateByDoc] = useState<FocusStateMap>({});
   const [focusRequestKey, setFocusRequestKey] = useState(0);
   const [pendingDocumentJump, setPendingDocumentJump] = useState<{ id: string; docName: string } | null>(null);
+  const [collabAuthToken, setCollabAuthToken] = useState<string | null>(null);
+  const [collabAuthResolved, setCollabAuthResolved] = useState(false);
   const [railPanelMode, setRailPanelMode] = useState<RailPanelMode>('collections');
   const [collectionSearch, setCollectionSearch] = useState('');
   const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null);
@@ -325,6 +350,31 @@ export function App() {
     }
     return defaultCollabEnabled();
   }, [hasCharacterSelected]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!collabEnabled) {
+      setCollabAuthToken(null);
+      setCollabAuthResolved(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setCollabAuthResolved(false);
+    fetchCollabAuthToken().then((token) => {
+      if (cancelled) {
+        return;
+      }
+      setCollabAuthToken(token);
+      setCollabAuthResolved(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [collabEnabled]);
 
   const activeManifestDoc = useMemo(
     () => workspace.manifestsByCollectionId[workspace.activeCollectionId] ?? null,
@@ -637,13 +687,14 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!collabEnabled) {
+    if (!collabEnabled || !collabAuthResolved) {
       return;
     }
 
     const collab = new CollabClient({
       url: COLLAB_WS_URL,
       user: localUser,
+      authToken: collabAuthToken,
       onDocChanged: applyWorkspaceFromCollab,
       onPresenceChanged: refreshPresenceFromCollab,
     });
@@ -672,7 +723,7 @@ export function App() {
       collab.disconnectAll();
       collabClientRef.current = null;
     };
-  }, [applyWorkspaceFromCollab, collabEnabled, localUser, refreshPresenceFromCollab]);
+  }, [applyWorkspaceFromCollab, collabAuthResolved, collabAuthToken, collabEnabled, localUser, refreshPresenceFromCollab]);
 
   useEffect(() => {
     if (!collabEnabled) {

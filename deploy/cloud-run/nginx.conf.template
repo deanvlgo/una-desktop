@@ -3,8 +3,6 @@ server {
     listen [::]:${PORT};
     server_name _;
 
-    ${AUTH_BLOCK}
-
     root /app/apps/web/dist;
     index index.html;
 
@@ -13,7 +11,15 @@ server {
         return 200 "ok";
     }
 
+    location = /collab-token {
+        ${AUTH_BLOCK}
+        add_header Cache-Control "no-store";
+        add_header Content-Type text/plain;
+        return 200 "${COLLAB_AUTH_TOKEN}";
+    }
+
     location = /collab {
+        auth_basic off;
         proxy_pass http://127.0.0.1:${HOCUSPOCUS_PORT}/;
         proxy_http_version 1.1;
 
@@ -30,6 +36,7 @@ server {
     }
 
     location /collab/ {
+        auth_basic off;
         proxy_pass http://127.0.0.1:${HOCUSPOCUS_PORT}/;
         proxy_http_version 1.1;
 
@@ -46,6 +53,7 @@ server {
     }
 
     location / {
+        ${AUTH_BLOCK}
         try_files $uri $uri/ /index.html;
     }
 }

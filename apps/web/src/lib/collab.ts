@@ -28,6 +28,7 @@ type PresenceState = {
 type CollabClientOptions = {
   url: string;
   user: CollabUser;
+  authToken?: string | null;
   onDocChanged?: (docName: string) => void;
   onPresenceChanged?: () => void;
 };
@@ -72,6 +73,7 @@ export class CollabClient {
     const provider = new HocuspocusProvider({
       url: this.options.url,
       name: seed.docName,
+      ...(this.options.authToken ? { token: this.options.authToken } : {}),
       onSynced: ({ state }) => {
         if (!state) {
           this.syncedRooms.delete(seed.docName);

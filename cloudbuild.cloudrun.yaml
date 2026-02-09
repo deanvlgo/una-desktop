@@ -4,6 +4,7 @@ substitutions:
   _SERVICE: una-editor
   _BASIC_AUTH_USER_SECRET: una-editor-basic-auth-user
   _BASIC_AUTH_PASSWORD_SECRET: una-editor-basic-auth-password
+  _COLLAB_AUTH_TOKEN_SECRET: una-editor-collab-token
 
 steps:
   - name: gcr.io/cloud-builders/docker
@@ -49,7 +50,8 @@ steps:
       - --set-secrets
       - >-
         BASIC_AUTH_USER=${_BASIC_AUTH_USER_SECRET}:latest,
-        BASIC_AUTH_PASSWORD=${_BASIC_AUTH_PASSWORD_SECRET}:latest
+        BASIC_AUTH_PASSWORD=${_BASIC_AUTH_PASSWORD_SECRET}:latest,
+        COLLAB_AUTH_TOKEN=${_COLLAB_AUTH_TOKEN_SECRET}:latest
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/docker/${_SERVICE}
