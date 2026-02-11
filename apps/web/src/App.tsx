@@ -4,38 +4,20 @@ import {
   InMemoryAgentActionLog,
   acceptMoveSubtreeCrossSeries,
   acceptSuggestionBlock,
-  acceptSuggestionDelete,
   acceptSuggestionGroup,
-  acceptSuggestionInsert,
-  appendSeriesOpSuggestion,
   createPairedMoveProposals,
-  createSuggestionBlockNode,
   evaluateMoveProposalStaleness,
   exportCollection,
   listBlockSuggestions,
-  listInlineSuggestionIds,
   moveSeriesRef,
   rejectMoveSubtreeCrossSeries,
   rejectSuggestionBlock,
-  rejectSuggestionDelete,
   rejectSuggestionGroup,
-  rejectSuggestionInsert,
   manifestDocName,
   seriesDocName,
 } from '../../../packages/core/src';
-import type {
-  AgentActionLogRecord,
-  CollectionManifestDoc,
-  PMNode,
-  SeriesDoc,
-  SuggestionBlockNode,
-} from '../../../src/contracts/types';
-import inlineDeleteParagraphFixture from '../../../src/fixtures/suggestion.inline-delete.paragraph.json';
-import inlineInsertParagraphFixture from '../../../src/fixtures/suggestion.inline-insert.paragraph.json';
+import type { AgentActionLogRecord, CollectionManifestDoc, PMNode, SeriesDoc } from '../../../src/contracts/types';
 import manifestFixture from '../../../src/fixtures/manifest.doc.json';
-import suggestionCreateItemFixture from '../../../src/fixtures/suggestion.block.create-item.json';
-import suggestionMoveFixture from '../../../src/fixtures/suggestion.block.move-cross-series.source.json';
-import suggestionReorderFixture from '../../../src/fixtures/suggestion.block.reorder-sibling.json';
 import historiqLogo from './assets/historiq-logo.svg';
 import { FindingAidEditor, buildFindingAidDocJson, type HierarchyHeading } from './components/FindingAidEditor';
 import { FindingAidHierarchy } from './components/FindingAidHierarchy';
@@ -1188,14 +1170,6 @@ export function App() {
     });
   }, [activeSeriesDoc, workspace.seriesDocs]);
 
-  const inlineSuggestions = useMemo(() => {
-    if (!activeSeriesDoc) {
-      return { insertIds: [] as string[], deleteIds: [] as string[] };
-    }
-
-    return listInlineSuggestionIds(activeSeriesDoc);
-  }, [activeSeriesDoc]);
-
   const suggestionsByGroup = useMemo(() => {
     const grouped = new Map<string, string[]>();
 
@@ -1413,29 +1387,6 @@ export function App() {
       });
     },
     [applyBlockSuggestionDecision, appendActionLog, blockSuggestions, localUser.id, workspace],
-  );
-
-  const applyInlineSuggestionDecision = useCallback(
-    (sid: string, kind: 'insert' | 'delete', decision: 'accept' | 'reject') => {
-      updateActiveSeriesDoc((doc) => {
-        if (kind === 'insert') {
-          return (decision === 'accept' ? acceptSuggestionInsert(doc, sid) : rejectSuggestionInsert(doc, sid)).doc as SeriesDoc;
-        }
-
-        return (decision === 'accept' ? acceptSuggestionDelete(doc, sid) : rejectSuggestionDelete(doc, sid)).doc as SeriesDoc;
-      });
-
-      appendActionLog({
-        opId: crypto.randomUUID(),
-        userId: localUser.id,
-        createdAt: Date.now(),
-        docNames: [workspace.activeSeriesDocName],
-        suggestionIds: [sid],
-        promptSummary: `${decision.toUpperCase()} inline ${kind}`,
-        result: 'ok',
-      });
-    },
-    [appendActionLog, localUser.id, updateActiveSeriesDoc, workspace.activeSeriesDocName],
   );
 
   const applyManualHierarchyMove = useCallback(
@@ -2022,35 +1973,6 @@ export function App() {
                 onCursorHierarchyFocus={focusHierarchyNodeFromDocument}
                 onChange={(nextContent) => updateActiveSeriesDoc((doc) => setSeriesBodyNodes(doc, nextContent))}
               />
-
-              <div className="inline-actions inline-actions--document">
-                <h3>Inline Suggestions</h3>
-                {inlineSuggestions.insertIds.map((sid) => (
-                  <div key={`insert-${sid}`} className="inline-action-row">
-                    <span>Insert `{sid}`</span>
-                    <button type="button" onClick={() => applyInlineSuggestionDecision(sid, 'insert', 'accept')}>
-                      Accept
-                    </button>
-                    <button type="button" onClick={() => applyInlineSuggestionDecision(sid, 'insert', 'reject')}>
-                      Reject
-                    </button>
-                  </div>
-                ))}
-                {inlineSuggestions.deleteIds.map((sid) => (
-                  <div key={`delete-${sid}`} className="inline-action-row">
-                    <span>Delete `{sid}`</span>
-                    <button type="button" onClick={() => applyInlineSuggestionDecision(sid, 'delete', 'accept')}>
-                      Accept
-                    </button>
-                    <button type="button" onClick={() => applyInlineSuggestionDecision(sid, 'delete', 'reject')}>
-                      Reject
-                    </button>
-                  </div>
-                ))}
-                {inlineSuggestions.insertIds.length === 0 && inlineSuggestions.deleteIds.length === 0 ? (
-                  <p className="inline-action-empty">No inline suggestions currently present.</p>
-                ) : null}
-              </div>
             </section>
           ) : visibleMode === 'focus' ? (
             <section className="panel focus-panel cms-panel" aria-label="Catalog view">
@@ -3039,68 +2961,14 @@ function createInitialWorkspace(): WorkspaceState {
   const primaryManifestDoc = structuredClone(manifestFixture) as CollectionManifestDoc;
   const secondaryManifestDoc = createSecondaryManifestStub();
   const sourceDoc = createSeriesAStub();
-  let targetDoc = createSeriesBStub();
+  const targetDoc = createSeriesBStub();
   const tertiaryDoc = createSeriesCStub();
   const quaternaryDoc = createSeriesDStub();
   const quinaryDoc = createSeriesEStub();
   const senaryDoc = createSeriesFStub();
 
-  targetDoc = injectInlineSuggestionParagraphs(targetDoc);
-  targetDoc = appendSeriesOpSuggestion(
-    targetDoc,
-    structuredClone(suggestionCreateItemFixture) as unknown as SuggestionBlockNode,
-  );
-  targetDoc = appendSeriesOpSuggestion(
-    targetDoc,
-    structuredClone(suggestionReorderFixture) as unknown as SuggestionBlockNode,
-  );
-
-  targetDoc = appendSeriesOpSuggestion(
-    targetDoc,
-    createSuggestionBlockNode({
-      sid: 'sug-group-ui-1',
-      groupId: 'group-ui-1',
-      kind: 'SET_FIELD',
-      author: 'LLM',
-      payload: {
-        itemId: 'item-photo-001',
-        key: 'takenBy',
-        valueType: 'text',
-        value: 'Archivist Staff',
-      },
-    }),
-  );
-
-  targetDoc = appendSeriesOpSuggestion(
-    targetDoc,
-    createSuggestionBlockNode({
-      sid: 'sug-group-ui-2',
-      groupId: 'group-ui-1',
-      kind: 'SET_FIELD',
-      author: 'LLM',
-      payload: {
-        itemId: 'item-photo-001',
-        key: 'materialType',
-        valueType: 'select',
-        value: 'digital',
-      },
-    }),
-  );
-
-  const movePayload = (suggestionMoveFixture as any).attrs.payload;
-  const moveSid = (suggestionMoveFixture as any).attrs.sid as string;
-
-  const paired = createPairedMoveProposals({
-    sourceDoc,
-    targetDoc,
-    payload: movePayload,
-    sid: moveSid,
-    author: 'LLM',
-    createdAt: Date.now(),
-  });
-
-  const seededSource = syncSeriesBodyWithHierarchy(paired.sourceDoc);
-  const seededTarget = syncSeriesBodyWithHierarchy(paired.targetDoc);
+  const seededSource = syncSeriesBodyWithHierarchy(sourceDoc);
+  const seededTarget = syncSeriesBodyWithHierarchy(targetDoc);
   const seededTertiary = syncSeriesBodyWithHierarchy(tertiaryDoc);
   const seededQuaternary = syncSeriesBodyWithHierarchy(quaternaryDoc);
   const seededQuinary = syncSeriesBodyWithHierarchy(quinaryDoc);
@@ -3123,23 +2991,6 @@ function createInitialWorkspace(): WorkspaceState {
     activeCollectionId: PRIMARY_COLLECTION_ID,
     activeSeriesDocName: SERIES_B_DOC_NAME,
   };
-}
-
-function injectInlineSuggestionParagraphs(doc: SeriesDoc): SeriesDoc {
-  const next = structuredClone(doc);
-  const seriesRoot = next.content[0];
-  const seriesBody = seriesRoot.content?.find((node) => node.type === 'seriesBody');
-
-  if (!seriesBody) {
-    return next;
-  }
-
-  seriesBody.content = [
-    structuredClone(inlineInsertParagraphFixture) as PMNode,
-    structuredClone(inlineDeleteParagraphFixture) as PMNode,
-  ];
-
-  return next;
 }
 
 function createSecondaryManifestStub(): CollectionManifestDoc {
@@ -3233,7 +3084,7 @@ function createSeriesAStub(): SeriesDoc {
                 content: [
                   {
                     type: 'text',
-                    text: 'Administrative correspondence and internal policy records.',
+                    text: 'This series documents governance and administrative operations of the Great Lakes Railroad Historical Society and its predecessor offices. Records include board minutes, annual budgets, staffing memoranda, procurement files, and policy circulars maintained by the secretary and comptroller.',
                   },
                 ],
               },
@@ -3242,7 +3093,7 @@ function createSeriesAStub(): SeriesDoc {
                 content: [
                   {
                     type: 'text',
-                    text: 'Includes budgets, governance notes, and executive correspondence.',
+                    text: 'Materials are strongest for the years 1924-1938, when expansion and modernization projects generated sustained correspondence between executive leadership, legal counsel, and regional station managers.',
                   },
                 ],
               },
@@ -3402,7 +3253,16 @@ function createSeriesBStub(): SeriesDoc {
                 content: [
                   {
                     type: 'text',
-                    text: 'Photographs documenting railroad infrastructure and staff.',
+                    text: 'The Photographic Materials series contains prints, negatives, and contact sheets created by staff photographers and contracted studios to document facilities, rolling stock, right-of-way improvements, and railroad personnel.',
+                  },
+                ],
+              },
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Images are arranged by subject and location and often retain original caption slips with dates, train numbers, or station identifiers; gaps in coverage appear after 1939, when routine documentation shifted to departmental scrapbooks.',
                   },
                 ],
               },
@@ -3510,7 +3370,16 @@ function createSeriesCStub(): SeriesDoc {
                 content: [
                   {
                     type: 'text',
-                    text: 'Technical drawings and plans created by the engineering division.',
+                    text: 'This series preserves engineering drawings produced for bridge construction, station renovations, track alignments, and utility relocations. Drafting conventions and revision stamps provide evidence of design changes over multiple decades.',
+                  },
+                ],
+              },
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Most sheets are blueprint or linen copies with annotations by field engineers; oversized handling restrictions apply, and researchers should request map-case retrieval in advance.',
                   },
                 ],
               },
@@ -3604,7 +3473,16 @@ function createSeriesDStub(): SeriesDoc {
                 content: [
                   {
                     type: 'text',
-                    text: 'Records documenting planning decisions, public hearings, and ordinance implementation.',
+                    text: 'Policy and Governance Files document planning commission deliberations, ordinance drafting, and implementation guidance distributed to neighborhood offices. The records capture how planning priorities shifted in response to industrial decline and postwar redevelopment.',
+                  },
+                ],
+              },
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Meeting packets frequently include staff reports, annotated agenda drafts, and public comment summaries. Personally identifying information in complaint exhibits may be redacted in researcher copies.',
                   },
                 ],
               },
@@ -3690,7 +3568,16 @@ function createSeriesEStub(): SeriesDoc {
                 content: [
                   {
                     type: 'text',
-                    text: 'Photographic surveys capturing neighborhood conditions before redevelopment initiatives.',
+                    text: 'The Neighborhood Survey Photography series contains field photography commissioned to assess housing stock, commercial corridors, and street infrastructure prior to major planning interventions.',
+                  },
+                ],
+              },
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Photographs are commonly sequenced by survey route and block face, with matching index cards noting date, district, and inspector initials. Some late campaigns include aerial reference images from contracted firms.',
                   },
                 ],
               },
@@ -3776,7 +3663,16 @@ function createSeriesFStub(): SeriesDoc {
                 content: [
                   {
                     type: 'text',
-                    text: 'Project plans and revisions for waterfront, transit, and mixed-use redevelopment projects.',
+                    text: 'Redevelopment Project Plans include conceptual plans, phased construction drawings, environmental review exhibits, and revision sets for waterfront, transit, and mixed-use initiatives administered by the planning department.',
+                  },
+                ],
+              },
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Plan sets are arranged by project code and revision number. Companion cost summaries and milestone charts are filed with each project phase when available.',
                   },
                 ],
               },

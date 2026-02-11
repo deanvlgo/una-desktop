@@ -283,12 +283,18 @@ function readContentFromEditor(json: JSONContent): PMNode[] {
 
 function flattenPaginationNodes(nodes: PMNode[]): PMNode[] {
   const flattened: PMNode[] = [];
+  const pageBodySignatures = new Set<string>();
 
   for (const node of nodes) {
     if (node.type === 'page') {
       const regions = Array.isArray(node.content) ? (node.content as PMNode[]) : [];
       const bodyNode = regions.find((region) => region.type === 'body');
       const bodyContent = Array.isArray(bodyNode?.content) ? (bodyNode.content as PMNode[]) : [];
+      const signature = JSON.stringify(bodyContent);
+      if (pageBodySignatures.has(signature)) {
+        continue;
+      }
+      pageBodySignatures.add(signature);
       for (const child of bodyContent) {
         flattened.push(structuredClone(child));
       }
