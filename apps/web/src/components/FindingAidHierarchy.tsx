@@ -64,6 +64,7 @@ type SiblingMeta = {
 const LEVEL_LABELS: Record<HierarchyLevel, string> = {
   series: 'Series',
   subseries: 'Subseries',
+  box: 'Box',
   file: 'File',
   item: 'Item',
 };
@@ -71,6 +72,7 @@ const LEVEL_LABELS: Record<HierarchyLevel, string> = {
 const LEVEL_COLORS: Record<HierarchyLevel, string> = {
   series: '#ff5757',
   subseries: '#ff5757',
+  box: '#8b5cf6',
   file: '#3b82f6',
   item: '#6b7280',
 };
@@ -480,7 +482,7 @@ export function FindingAidHierarchy({
   return (
     <div className="finding-hierarchy" aria-label="Guided processing hierarchy">
       <div className="finding-hierarchy__levels">
-        {(['series', 'subseries', 'file', 'item'] as const).map((level) => (
+        {(['series', 'subseries', 'box', 'file', 'item'] as const).map((level) => (
           <span key={level} className="finding-hierarchy__level-chip">
             <span className="finding-hierarchy__level-dot" style={{ backgroundColor: LEVEL_COLORS[level] }} />
             {LEVEL_LABELS[level]}
@@ -898,9 +900,9 @@ function computeCanOutdent(entry: OutlineEntry, outlineById: Map<string, Outline
 
 function canContainHierarchyLevel(parent: HierarchyLevel, child: HierarchyLevel): boolean {
   if (parent === 'series' || parent === 'subseries') {
-    return child === 'subseries' || child === 'file';
+    return child === 'subseries' || child === 'box' || child === 'file';
   }
-  if (parent === 'file') {
+  if (parent === 'box' || parent === 'file') {
     return child === 'item';
   }
   return false;
@@ -908,9 +910,9 @@ function canContainHierarchyLevel(parent: HierarchyLevel, child: HierarchyLevel)
 
 function getAddChildLevelOptions(level: HierarchyLevel): HierarchyLevel[] {
   if (level === 'series' || level === 'subseries') {
-    return ['subseries', 'file'];
+    return ['subseries', 'box', 'file'];
   }
-  if (level === 'file') {
+  if (level === 'box' || level === 'file') {
     return ['item'];
   }
   return [];

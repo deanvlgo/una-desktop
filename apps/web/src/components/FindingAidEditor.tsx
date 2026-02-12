@@ -1,15 +1,17 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { JSONContent, Mark, Node, mergeAttributes } from '@tiptap/core';
+import { Extension, JSONContent, Mark, Node, mergeAttributes } from '@tiptap/core';
 import Heading from '@tiptap/extension-heading';
 import Link from '@tiptap/extension-link';
 import Underline from '@tiptap/extension-underline';
+import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 
 import type { PMNode } from '../../../../src/contracts/types';
 
-type HierarchyLevel = 'series' | 'subseries' | 'file' | 'item';
+type HierarchyLevel = 'series' | 'subseries' | 'box' | 'file' | 'item';
 
 export type HierarchyHeading = {
   id: string;
@@ -25,8 +27,26 @@ type FindingAidEditorProps = {
   focusedHierarchyId?: string;
   focusRequestKey?: number;
   onCursorHierarchyFocus?: (hierarchyId: string) => void;
+  onCaretChange?: (caret: FindingAidCaret | null) => void;
+  presenceUsers?: PresenceUser[];
+  remoteCursors?: FindingAidRemoteCursor[];
   onChange: (nextContent: PMNode[]) => void;
 };
+
+type PresenceUser = {
+  id: string;
+  name: string;
+  color: string;
+  avatar?: string;
+  presenceKey?: string;
+};
+
+type FindingAidCaret = {
+  anchor: number;
+  head: number;
+};
+
+type FindingAidRemoteCursor = PresenceUser & FindingAidCaret;
 
 const SuggestionInsertMark = Mark.create({
   name: 'suggestion_insert',
@@ -334,6 +354,111 @@ function readHierarchyIdAtSelection(editor: ReturnType<typeof useEditor>): strin
   return firstHierarchyId;
 }
 
+const REMOTE_CURSOR_PLUGIN_KEY = new PluginKey('findingAidRemoteCursors');
+const REMOTE_CURSOR_REFRESH_META = 'findingAidRemoteCursorRefresh';
+
+function clampDocPos(value: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return 1;
+  }
+  const rounded = Math.round(value);
+  if (rounded < 1) {
+    return 1;
+  }
+  if (rounded > max) {
+    return max;
+  }
+  return rounded;
+}
+
+function buildRemoteCursorDecorations(doc: any, cursors: FindingAidRemoteCursor[]): DecorationSet {
+  const maxPos = Math.max(1, doc.content.size);
+  const decorations: Decoration[] = [];
+
+  for (const cursor of cursors) {
+    const anchor = clampDocPos(cursor.anchor, maxPos);
+    const head = clampDocPos(cursor.head, maxPos);
+    const start = Math.min(anchor, head);
+    const end = Math.max(anchor, head);
+    const color = cursor.color || '#0ea5e9';
+    const markerKey = cursor.presenceKey ?? `${cursor.id}:${anchor}:${head}`;
+    const displayName = cursor.name?.trim() || cursor.id;
+    const initial = displayName.charAt(0).toUpperCase() || '?';
+
+    if (end > start) {
+      decorations.push(
+        Decoration.inline(
+          start,
+          end,
+          {
+            class: 'finding-aid__remote-selection',
+            style: `--remote-caret-color:${color};`,
+          },
+          { key: `selection-${markerKey}` },
+        ),
+      );
+    }
+
+    decorations.push(
+      Decoration.widget(
+        head,
+        () => {
+          const root = document.createElement('span');
+          root.className = 'finding-aid__remote-caret';
+          root.style.setProperty('--remote-caret-color', color);
+          root.title = displayName;
+
+          const bar = document.createElement('span');
+          bar.className = 'finding-aid__remote-caret-bar';
+          root.appendChild(bar);
+
+          const label = document.createElement('span');
+          label.className = 'finding-aid__remote-caret-label';
+          label.textContent = initial;
+          root.appendChild(label);
+
+          return root;
+        },
+        { side: 1, key: `caret-${markerKey}` },
+      ),
+    );
+  }
+
+  return DecorationSet.create(doc, decorations);
+}
+
+const RemoteCursorExtension = Extension.create<{ getCursors: () => FindingAidRemoteCursor[] }>({
+  name: 'remoteCursorDecorations',
+
+  addOptions() {
+    return {
+      getCursors: () => [],
+    };
+  },
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: REMOTE_CURSOR_PLUGIN_KEY,
+        state: {
+          init: (_, state) => buildRemoteCursorDecorations(state.doc, this.options.getCursors()),
+          apply: (tr, value) => {
+            if (tr.docChanged || tr.getMeta(REMOTE_CURSOR_REFRESH_META)) {
+              return buildRemoteCursorDecorations(tr.doc, this.options.getCursors());
+            }
+            return value.map(tr.mapping, tr.doc);
+          },
+        },
+        props: {
+          decorations(state) {
+            return this.getState(state) as DecorationSet;
+          },
+        },
+      }),
+    ];
+  },
+});
+
 function EditorActionButton({
   children,
   active,
@@ -366,11 +491,16 @@ export function FindingAidEditor({
   focusedHierarchyId,
   focusRequestKey = 0,
   onCursorHierarchyFocus,
+  onCaretChange,
+  presenceUsers = [],
+  remoteCursors = [],
   onChange,
 }: FindingAidEditorProps) {
   const isApplyingRef = useRef(false);
   const hierarchyHeadingsRef = useRef(hierarchyHeadings);
   const onCursorHierarchyFocusRef = useRef(onCursorHierarchyFocus);
+  const onCaretChangeRef = useRef(onCaretChange);
+  const remoteCursorsRef = useRef(remoteCursors);
   const lastReportedHierarchyIdRef = useRef<string | null>(null);
   const onChangeRef = useRef(onChange);
   const contentSignature = useMemo(() => JSON.stringify(content), [content]);
@@ -382,8 +512,13 @@ export function FindingAidEditor({
   useEffect(() => {
     hierarchyHeadingsRef.current = hierarchyHeadings;
     onCursorHierarchyFocusRef.current = onCursorHierarchyFocus;
+    onCaretChangeRef.current = onCaretChange;
     onChangeRef.current = onChange;
-  }, [hierarchyHeadings, onCursorHierarchyFocus, onChange]);
+  }, [hierarchyHeadings, onCaretChange, onCursorHierarchyFocus, onChange]);
+
+  useEffect(() => {
+    remoteCursorsRef.current = remoteCursors;
+  }, [remoteCursors]);
 
   const editor = useEditor({
     extensions: [
@@ -397,6 +532,9 @@ export function FindingAidEditor({
       }),
       SuggestionInsertMark,
       SuggestionDeleteNode,
+      RemoteCursorExtension.configure({
+        getCursors: () => remoteCursorsRef.current,
+      }),
     ],
     content: contentToDoc(content, hierarchyHeadings),
     editorProps: {
@@ -424,6 +562,12 @@ export function FindingAidEditor({
         return;
       }
 
+      const selection = current.state.selection;
+      onCaretChangeRef.current?.({
+        anchor: selection.anchor,
+        head: selection.head,
+      });
+
       const hierarchyId = readHierarchyIdAtSelection(current);
       if (!hierarchyId || lastReportedHierarchyIdRef.current === hierarchyId) {
         return;
@@ -431,6 +575,9 @@ export function FindingAidEditor({
 
       lastReportedHierarchyIdRef.current = hierarchyId;
       onCursorHierarchyFocusRef.current?.(hierarchyId);
+    },
+    onBlur: () => {
+      onCaretChangeRef.current?.(null);
     },
   }, []);
 
@@ -475,6 +622,13 @@ export function FindingAidEditor({
     lastReportedHierarchyIdRef.current = focusedHierarchyId;
     editor.chain().focus(headingPos + 1).scrollIntoView().run();
   }, [editor, focusedHierarchyId, focusRequestKey]);
+
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) {
+      return;
+    }
+    editor.view.dispatch(editor.state.tr.setMeta(REMOTE_CURSOR_REFRESH_META, Date.now()));
+  }, [editor, remoteCursors]);
 
   const setLink = useCallback(() => {
     if (!editor) {
@@ -527,6 +681,26 @@ export function FindingAidEditor({
           <span className="finding-aid__toolbar-hint">
             A descriptive guide that helps locate and understand archival materials
           </span>
+          {presenceUsers.length > 0 ? (
+            <div className="finding-aid__presence">
+              <span>Here now:</span>
+              <div className="finding-aid__presence-chips">
+                {presenceUsers.slice(0, 4).map((entry) => (
+                  <span
+                    key={entry.presenceKey ?? entry.id}
+                    className="finding-aid__presence-chip"
+                    style={{ background: entry.color }}
+                    title={entry.name}
+                  >
+                    {entry.avatar ? <img src={entry.avatar} alt={entry.name} /> : (entry.name.trim().charAt(0) || '?').toUpperCase()}
+                  </span>
+                ))}
+                {presenceUsers.length > 4 ? (
+                  <span className="finding-aid__presence-overflow">+{presenceUsers.length - 4}</span>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="finding-aid__toolbar-actions">

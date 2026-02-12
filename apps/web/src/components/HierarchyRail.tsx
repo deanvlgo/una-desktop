@@ -26,6 +26,7 @@ type LevelConfig = {
 const LEVEL_CONFIG: Record<HierarchyLevel, LevelConfig> = {
   series: { label: 'Series', color: '#ff5757' },
   subseries: { label: 'Subseries', color: '#8b5cf6' },
+  box: { label: 'Box', color: '#8b5cf6' },
   file: { label: 'File', color: '#3b82f6' },
   item: { label: 'Item', color: '#6b7280' },
 };

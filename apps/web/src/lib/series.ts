@@ -9,7 +9,7 @@ export type FocusState = {
   policy: 'focusPlusAncestors';
 };
 
-export type HierarchyLevel = 'series' | 'subseries' | 'file' | 'item';
+export type HierarchyLevel = 'series' | 'subseries' | 'box' | 'file' | 'item';
 
 export type HierarchyNode = {
   id: UUID;
@@ -163,15 +163,17 @@ export function readFocusedNode(doc: SeriesDoc, nodeId: UUID | null): FocusedNod
     return null;
   }
 
+  const level = hierarchyLevelFromNode(found);
+
   const model: FocusedNodeModel = {
     id: nodeId,
-    level: type,
+    level,
     title: labelForNode(found),
     fields: [],
     metadata: {},
   };
 
-  if (type === 'item') {
+  if (level === 'item') {
     model.itemType = found.attrs?.itemType as ItemType | undefined;
     model.fields = readItemFields(found);
   } else {
@@ -570,7 +572,7 @@ function nodeChildrenToHierarchy(content: PMNode[], parentPath: string): Hierarc
     const nodeId = String(node.attrs?.id ?? `${parentPath}/${node.type}-${index}`);
     const child: HierarchyNode = {
       id: nodeId,
-      level: node.type,
+      level: hierarchyLevelFromNode(node),
       title: labelForNode(node),
       children: [],
     };
@@ -584,6 +586,20 @@ function nodeChildrenToHierarchy(content: PMNode[], parentPath: string): Hierarc
   }
 
   return hierarchy;
+}
+
+function hierarchyLevelFromNode(node: PMNode): HierarchyLevel {
+  if (node.type === 'file') {
+    const sourceLevel = String(node.attrs?.sourceLevel ?? '').toLowerCase();
+    if (sourceLevel === 'box') {
+      return 'box';
+    }
+    return 'file';
+  }
+  if (node.type === 'series' || node.type === 'subseries' || node.type === 'item') {
+    return node.type;
+  }
+  return 'item';
 }
 
 function labelForNode(node: PMNode): string {
@@ -804,7 +820,7 @@ function isTypedNode(node: SeriesDoc | PMNode): node is PMNode {
 
 function canContainHierarchyNode(parentType: string, childType: string): boolean {
   if (parentType === 'series' || parentType === 'subseries') {
-    return childType === 'subseries' || childType === 'file';
+    return childType === 'subseries' || childType === 'box' || childType === 'file';
   }
   if (parentType === 'file') {
     return childType === 'item';
@@ -938,10 +954,10 @@ function createHierarchyNode(
     };
   }
 
-  if (level === 'file') {
+  if (level === 'box' || level === 'file') {
     return {
       type: 'file',
-      attrs: { id, title },
+      attrs: { id, title, sourceLevel: level },
       content: [],
     };
   }
@@ -991,6 +1007,9 @@ function createHierarchyNode(
 function defaultTitleForLevel(level: HierarchyLevel): string {
   if (level === 'subseries') {
     return 'New Subseries';
+  }
+  if (level === 'box') {
+    return 'New Box';
   }
   if (level === 'file') {
     return 'New File';

@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
 import {
-  AwarenessStore,
   InMemoryAgentActionLog,
   acceptMoveSubtreeCrossSeries,
   acceptSuggestionBlock,
@@ -63,6 +62,20 @@ import {
   type ItemFieldModel,
 } from './lib/series';
 import { userInitials } from './lib/user';
+import type { AuthenticatedUser } from './types/auth';
+import {
+  connectOrgIndex,
+  disconnectOrgIndex,
+  getOrgIndexEntry,
+  readOrgIndexEntries,
+  upsertOrgIndexEntry,
+} from './lib/canonicalIndex';
+import {
+  collectionManifestDocName,
+  seriesDocName as canonicalSeriesDocName,
+  type OrgCollectionIndexEntry,
+} from './lib/canonicalRooms';
+import { connectPresenceRoom, disconnectPresenceRoom, type PresenceRoomConnection } from './lib/canonicalPresence';
 
 type ManifestSeriesRef = {
   seriesId: string;
@@ -89,7 +102,25 @@ type CmsFieldSpec = {
   multiline?: boolean;
 };
 
-type PresenceMap = Record<string, Array<{ id: string; name: string; color: string }>>;
+type PresenceEntry = {
+  id: string;
+  name: string;
+  color: string;
+  avatar?: string;
+  presenceKey?: string;
+};
+
+type PresenceMap = Record<string, PresenceEntry[]>;
+
+type PresenceCursor = PresenceEntry & {
+  anchor: number;
+  head: number;
+};
+type AppProps = {
+  currentUser: AuthenticatedUser;
+  token: string;
+  onLogout: () => void;
+};
 
 const PRIMARY_COLLECTION_ID = 'col-001';
 const SECONDARY_COLLECTION_ID = 'col-002';
@@ -104,6 +135,7 @@ const SERIES_F_DOC_NAME = seriesDocName(SECONDARY_COLLECTION_ID, 'series-f');
 const CMS_LEVEL_COLORS: Record<HierarchyLevel, string> = {
   series: '#ff5757',
   subseries: '#ff5757',
+  box: '#8b5cf6',
   file: '#3b82f6',
   item: '#6b7280',
 };
@@ -142,17 +174,53 @@ const CMS_FIELDS: CmsFieldSpec[] = [
   },
 ];
 
-const LOCAL_USER = { id: 'user-local', name: 'Archivist Reviewer', color: '#ff5757' };
-const PEER_USER = { id: 'user-peer', name: 'Peer Reviewer', color: '#3b82f6' };
-const LOCAL_USER_INITIALS = userInitials(LOCAL_USER.name);
 const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
 
-export function App() {
+function toOrgScopedSeriesPresenceDocName(rawDocName: string, orgId: string, activeCollectionId: string): string {
+  if (rawDocName.startsWith('series:')) {
+    const parts = rawDocName.split(':');
+    if (parts.length === 4) {
+      return rawDocName;
+    }
+    if (parts.length === 3) {
+      return `series:${orgId}:${parts[1]}:${parts[2]}`;
+    }
+  }
+  const fallbackSeriesId = rawDocName.trim().length > 0 ? rawDocName : 'series';
+  return canonicalSeriesDocName(orgId, activeCollectionId, fallbackSeriesId);
+}
+
+function displayNameForUser(user: AuthenticatedUser) {
+  const first = user.first_name?.trim() ?? '';
+  const last = user.last_name?.trim() ?? '';
+  const fullName = `${first} ${last}`.trim();
+  if (fullName.length > 0) {
+    return fullName;
+  }
+  return user.email;
+}
+
+export function App({ currentUser, token, onLogout }: AppProps) {
+  const localUser = useMemo(
+    () => ({
+      id: currentUser.id,
+      name: displayNameForUser(currentUser),
+      color: '#ff5757',
+    }),
+    [currentUser],
+  );
+  const localUserInitials = useMemo(() => userInitials(localUser.name), [localUser.name]);
+
   const [workspace, setWorkspace] = useState<WorkspaceState>(() => createInitialWorkspace());
+  const initialWorkspaceRef = useRef<WorkspaceState | null>(null);
+  if (initialWorkspaceRef.current == null) {
+    initialWorkspaceRef.current = workspace;
+  }
   const [focusStateByDoc, setFocusStateByDoc] = useState<FocusStateMap>({});
   const [focusRequestKey, setFocusRequestKey] = useState(0);
   const [railPanelMode, setRailPanelMode] = useState<RailPanelMode>('collections');
   const [collectionSearch, setCollectionSearch] = useState('');
+  const [showArchivedCollections, setShowArchivedCollections] = useState(false);
   const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null);
   const [collectionTitleMenuOpenId, setCollectionTitleMenuOpenId] = useState<string | null>(null);
   const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
@@ -167,9 +235,167 @@ export function App() {
   const [logVersion, setLogVersion] = useState(0);
   const [presenceByNodeId, setPresenceByNodeId] = useState<PresenceMap>({});
   const [collectionPresence, setCollectionPresence] = useState<Record<string, number>>({});
+  const [findingAidRemoteCursors, setFindingAidRemoteCursors] = useState<PresenceCursor[]>([]);
+  const [catalogPresenceByField, setCatalogPresenceByField] = useState<Record<string, PresenceEntry[]>>({});
+  const [canonicalEntriesById, setCanonicalEntriesById] = useState<Record<string, OrgCollectionIndexEntry>>({});
+  const canonicalMapRef = useRef<import('yjs').Map<string> | null>(null);
+  const hasSeededCanonicalRef = useRef(false);
+  const awarenessInstanceIdRef = useRef<string>(`desktop-${crypto.randomUUID()}`);
+  const findingAidCaretRef = useRef<{ anchor: number; head: number } | null>(null);
+  const catalogFieldFocusRef = useRef<string | null>(null);
+  const presenceConnectionsRef = useRef<Map<string, PresenceRoomConnection>>(new Map());
+  const presenceConnectionCleanupRef = useRef<Map<string, () => void>>(new Map());
+  const [presenceRefreshTick, setPresenceRefreshTick] = useState(0);
+  const [presencePublishTick, setPresencePublishTick] = useState(0);
 
   const [actionLogStore] = useState(() => new InMemoryAgentActionLog());
-  const [awarenessStore] = useState(() => new AwarenessStore());
+
+  useEffect(() => {
+    const orgId = currentUser.organization_id;
+    if (!orgId || !token) {
+      setCanonicalEntriesById({});
+      return;
+    }
+
+    const connection = connectOrgIndex(orgId, token);
+    canonicalMapRef.current = connection.map;
+    let isDisposed = false;
+
+    const refreshEntries = () => {
+      if (isDisposed) {
+        return;
+      }
+
+      const entries = readOrgIndexEntries(connection.map);
+      const next: Record<string, OrgCollectionIndexEntry> = {};
+      for (const entry of entries) {
+        next[entry.collectionId] = entry;
+      }
+      setCanonicalEntriesById(next);
+    };
+
+    connection.map.observe(refreshEntries);
+    connection.provider.on('synced', () => {
+      if (hasSeededCanonicalRef.current) {
+        refreshEntries();
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      connection.doc.transact(() => {
+        const seedWorkspace = initialWorkspaceRef.current ?? workspace;
+        for (const collectionId of seedWorkspace.collectionOrder) {
+          if (getOrgIndexEntry(connection.map, collectionId)) {
+            continue;
+          }
+
+          const manifest = seedWorkspace.manifestsByCollectionId[collectionId];
+          const root = manifest?.content?.[0];
+          upsertOrgIndexEntry(connection.map, {
+            collectionId,
+            title: String(root?.attrs?.title ?? collectionId),
+            createdBy: currentUser.id,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            workflowStatus: 'describe_started',
+            submittedAt: null,
+            lastEditedBy: currentUser.id,
+            isArchived: false,
+            entryType: 'guided',
+          });
+        }
+      });
+
+      hasSeededCanonicalRef.current = true;
+      refreshEntries();
+    });
+
+    refreshEntries();
+
+    return () => {
+      isDisposed = true;
+      connection.map.unobserve(refreshEntries);
+      canonicalMapRef.current = null;
+      disconnectOrgIndex(connection);
+    };
+  }, [currentUser.id, currentUser.organization_id, token]);
+
+  useEffect(() => {
+    const canonicalIds = Object.keys(canonicalEntriesById);
+    if (canonicalIds.length === 0) {
+      return;
+    }
+
+    setWorkspace((previous) => {
+      let hasChanges = false;
+      const nextManifests = { ...previous.manifestsByCollectionId };
+      const nextOrder = [...previous.collectionOrder];
+
+      for (const collectionId of previous.collectionOrder) {
+        const canonical = canonicalEntriesById[collectionId];
+        if (!canonical) {
+          continue;
+        }
+
+        const manifest = previous.manifestsByCollectionId[collectionId];
+        if (!manifest) {
+          continue;
+        }
+
+        const currentTitle = String(manifest.content?.[0]?.attrs?.title ?? 'Untitled Collection');
+        if (currentTitle === canonical.title) {
+          continue;
+        }
+
+        const nextManifest = structuredClone(manifest);
+        const root = nextManifest.content[0];
+        root.attrs = {
+          ...(root.attrs ?? {}),
+          title: canonical.title,
+        };
+        nextManifests[collectionId] = nextManifest;
+        hasChanges = true;
+      }
+
+      for (const collectionId of canonicalIds) {
+        if (nextManifests[collectionId]) {
+          continue;
+        }
+
+        const canonical = canonicalEntriesById[collectionId];
+        if (!canonical) {
+          continue;
+        }
+
+        nextManifests[collectionId] = createPlaceholderManifest(collectionId, canonical.title);
+        nextOrder.push(collectionId);
+        hasChanges = true;
+      }
+
+      const canonicalOrder = nextOrder
+        .sort((leftId, rightId) => {
+          const left = canonicalEntriesById[leftId];
+          const right = canonicalEntriesById[rightId];
+          const leftTitle = left?.title ?? String(nextManifests[leftId]?.content?.[0]?.attrs?.title ?? leftId);
+          const rightTitle = right?.title ?? String(nextManifests[rightId]?.content?.[0]?.attrs?.title ?? rightId);
+          return leftTitle.localeCompare(rightTitle, undefined, { sensitivity: 'base' });
+        });
+
+      const orderChanged =
+        canonicalOrder.length !== previous.collectionOrder.length ||
+        canonicalOrder.some((collectionId, index) => collectionId !== previous.collectionOrder[index]);
+
+      if (!hasChanges && !orderChanged) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        manifestsByCollectionId: hasChanges ? nextManifests : previous.manifestsByCollectionId,
+        collectionOrder: orderChanged ? canonicalOrder : previous.collectionOrder,
+      };
+    });
+  }, [canonicalEntriesById]);
 
   const activeManifestDoc = useMemo(
     () => workspace.manifestsByCollectionId[workspace.activeCollectionId] ?? null,
@@ -192,19 +418,35 @@ export function App() {
         }
 
         const root = manifest.content[0];
+        const canonicalEntry = canonicalEntriesById[collectionId];
         const refs = readManifestSeriesRefs(manifest);
         const activeCount = refs.reduce((sum, ref) => sum + (collectionPresence[ref.docName] ?? 0), 0);
         return {
           collectionId,
-          title: String(root.attrs?.title ?? 'Untitled Collection'),
+          title: canonicalEntry?.title ?? String(root.attrs?.title ?? 'Untitled Collection'),
           description: readCollectionDescription(manifest),
           dates: String(root.attrs?.dates ?? ''),
           seriesRefs: refs,
           activeCount,
+          workflowStatus: canonicalEntry?.workflowStatus ?? 'describe_started',
+          submittedAt: canonicalEntry?.submittedAt ?? null,
+          isArchived: Boolean(canonicalEntry?.isArchived),
         };
       })
+      .filter((entry) => {
+        if (!entry) {
+          return false;
+        }
+        return showArchivedCollections ? true : !entry.isArchived;
+      })
       .filter((entry): entry is NonNullable<typeof entry> => entry != null);
-  }, [workspace.collectionOrder, workspace.manifestsByCollectionId, collectionPresence]);
+  }, [
+    workspace.collectionOrder,
+    workspace.manifestsByCollectionId,
+    collectionPresence,
+    canonicalEntriesById,
+    showArchivedCollections,
+  ]);
 
   const filteredCollectionEntries = useMemo(() => {
     const query = collectionSearch.trim().toLowerCase();
@@ -326,27 +568,238 @@ export function App() {
     }));
   }, [activeHierarchy, currentFocusState, updateCurrentFocusState]);
 
+  const seriesPresenceDocByRef = useMemo(() => {
+    const orgId = currentUser.organization_id;
+    const next: Record<string, string> = {};
+    if (!orgId) {
+      return next;
+    }
+    for (const ref of seriesRefs) {
+      next[ref.docName] = toOrgScopedSeriesPresenceDocName(ref.docName, orgId, workspace.activeCollectionId);
+    }
+    return next;
+  }, [currentUser.organization_id, seriesRefs, workspace.activeCollectionId]);
+
+  const requiredPresenceRooms = useMemo(() => {
+    const orgId = currentUser.organization_id;
+    if (!orgId || !token) {
+      return [];
+    }
+    const rooms = new Set<string>();
+    rooms.add(collectionManifestDocName(orgId, workspace.activeCollectionId));
+    Object.values(seriesPresenceDocByRef).forEach((docName) => rooms.add(docName));
+    return Array.from(rooms.values());
+  }, [currentUser.organization_id, seriesPresenceDocByRef, token, workspace.activeCollectionId]);
+
   useEffect(() => {
-    if (!activeHierarchy || !currentFocusState) {
+    if (!token || !currentUser.organization_id) {
+      for (const cleanup of presenceConnectionCleanupRef.current.values()) {
+        cleanup();
+      }
+      presenceConnectionCleanupRef.current.clear();
+      for (const connection of presenceConnectionsRef.current.values()) {
+        disconnectPresenceRoom(connection);
+      }
+      presenceConnectionsRef.current.clear();
+      setPresenceByNodeId({});
+      setCollectionPresence({});
+      setFindingAidRemoteCursors([]);
+      setCatalogPresenceByField({});
       return;
     }
 
-    const peerFocus = activeHierarchy.children[0]?.id ?? activeHierarchy.id;
-    awarenessStore.set(workspace.activeSeriesDocName, {
-      user: LOCAL_USER,
-      focusId: currentFocusState.focusedId,
-      updatedAt: Date.now(),
-    });
+    const required = new Set(requiredPresenceRooms);
+    for (const [roomName, connection] of presenceConnectionsRef.current.entries()) {
+      if (required.has(roomName)) {
+        continue;
+      }
+      const cleanup = presenceConnectionCleanupRef.current.get(roomName);
+      cleanup?.();
+      presenceConnectionCleanupRef.current.delete(roomName);
+      disconnectPresenceRoom(connection);
+      presenceConnectionsRef.current.delete(roomName);
+    }
 
-    awarenessStore.set(workspace.activeSeriesDocName, {
-      user: PEER_USER,
-      focusId: peerFocus,
-      updatedAt: Date.now(),
-    });
+    for (const roomName of requiredPresenceRooms) {
+      if (presenceConnectionsRef.current.has(roomName)) {
+        continue;
+      }
+      const connection = connectPresenceRoom(roomName, token);
+      const onPresenceChange = () => setPresenceRefreshTick((value) => value + 1);
+      connection.provider.awareness?.on('change', onPresenceChange);
+      connection.provider.on('synced', onPresenceChange);
+      presenceConnectionCleanupRef.current.set(roomName, () => {
+        connection.provider.awareness?.off('change', onPresenceChange);
+        connection.provider.off('synced', onPresenceChange);
+      });
+      presenceConnectionsRef.current.set(roomName, connection);
+    }
 
-    setPresenceByNodeId(awarenessStore.focusChips(workspace.activeSeriesDocName));
-    setCollectionPresence(awarenessStore.listCollectionPresence('series:'));
-  }, [awarenessStore, workspace.activeSeriesDocName, activeHierarchy, currentFocusState]);
+    setPresenceRefreshTick((value) => value + 1);
+  }, [currentUser.organization_id, requiredPresenceRooms, token]);
+
+  useEffect(() => {
+    return () => {
+      for (const cleanup of presenceConnectionCleanupRef.current.values()) {
+        cleanup();
+      }
+      presenceConnectionCleanupRef.current.clear();
+      for (const connection of presenceConnectionsRef.current.values()) {
+        disconnectPresenceRoom(connection);
+      }
+      presenceConnectionsRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    const connections = presenceConnectionsRef.current;
+    if (connections.size === 0) {
+      setPresenceByNodeId({});
+      setCollectionPresence({});
+      setFindingAidRemoteCursors([]);
+      setCatalogPresenceByField({});
+      return;
+    }
+
+    const nextByNodeId: PresenceMap = {};
+    const nextCollectionPresence: Record<string, number> = {};
+    const nextRemoteCursors: PresenceCursor[] = [];
+    const nextCatalogByField: Record<string, PresenceEntry[]> = {};
+    const seenNode = new Set<string>();
+    const seenCursor = new Set<string>();
+    const seenField = new Set<string>();
+
+    const currentFocusedNodeId = currentFocusState?.focusedId ?? null;
+
+    for (const [roomName, connection] of connections.entries()) {
+      const states = connection.provider.awareness?.getStates() ?? new Map<number, any>();
+      const usersInRoom = new Set<string>();
+
+      for (const [clientId, rawState] of states.entries()) {
+        const userState = rawState?.user as Partial<PresenceEntry> | undefined;
+        if (!userState?.id) {
+          continue;
+        }
+
+        const instanceId =
+          typeof rawState?.instanceId === 'string' && rawState.instanceId.trim().length > 0
+            ? rawState.instanceId
+            : null;
+        if (instanceId && instanceId === awarenessInstanceIdRef.current) {
+          continue;
+        }
+
+        const userId = String(userState.id);
+        usersInRoom.add(userId);
+        const focusId =
+          typeof rawState?.focusId === 'string' && rawState.focusId.trim().length > 0
+            ? rawState.focusId
+            : null;
+        if (!focusId) {
+          continue;
+        }
+
+        const surface =
+          typeof rawState?.surface === 'string' && rawState.surface.trim().length > 0
+            ? rawState.surface
+            : null;
+        const catalogFieldId =
+          typeof rawState?.catalogFieldId === 'string' && rawState.catalogFieldId.trim().length > 0
+            ? rawState.catalogFieldId
+            : null;
+        const cursorAnchor = typeof rawState?.cursorAnchor === 'number' ? rawState.cursorAnchor : null;
+        const cursorHead = typeof rawState?.cursorHead === 'number' ? rawState.cursorHead : null;
+
+        const entry: PresenceEntry = {
+          id: userId,
+          name:
+            typeof userState.name === 'string' && userState.name.trim().length > 0
+              ? userState.name
+              : userId,
+          color:
+            typeof userState.color === 'string' && userState.color.trim().length > 0
+              ? userState.color
+              : '#0ea5e9',
+          avatar:
+            typeof userState.avatar === 'string' && userState.avatar.trim().length > 0
+              ? userState.avatar
+              : undefined,
+          presenceKey: instanceId ?? `${userId}:${clientId}`,
+        };
+
+        const dedupeNodeKey = `${focusId}:${entry.presenceKey ?? entry.id}`;
+        if (!seenNode.has(dedupeNodeKey)) {
+          seenNode.add(dedupeNodeKey);
+          const list = nextByNodeId[focusId] ?? [];
+          list.push(entry);
+          nextByNodeId[focusId] = list;
+        }
+
+        if (surface === 'findingAid' && cursorAnchor != null) {
+          const cursorKey = `${entry.presenceKey ?? entry.id}:${focusId}:${cursorAnchor}:${cursorHead ?? cursorAnchor}`;
+          if (!seenCursor.has(cursorKey)) {
+            seenCursor.add(cursorKey);
+            nextRemoteCursors.push({
+              ...entry,
+              anchor: cursorAnchor,
+              head: cursorHead ?? cursorAnchor,
+            });
+          }
+        }
+
+        if (surface === 'catalog' && catalogFieldId && currentFocusedNodeId && focusId === currentFocusedNodeId) {
+          const fieldKey = `${focusId}::${catalogFieldId}`;
+          const dedupeFieldKey = `${fieldKey}:${entry.presenceKey ?? entry.id}`;
+          if (!seenField.has(dedupeFieldKey)) {
+            seenField.add(dedupeFieldKey);
+            const list = nextCatalogByField[fieldKey] ?? [];
+            list.push(entry);
+            nextCatalogByField[fieldKey] = list;
+          }
+        }
+      }
+
+      nextCollectionPresence[roomName] = usersInRoom.size;
+    }
+
+    for (const ref of seriesRefs) {
+      const roomName = seriesPresenceDocByRef[ref.docName] ?? ref.docName;
+      const count = nextCollectionPresence[roomName] ?? 0;
+      nextCollectionPresence[ref.docName] = count;
+    }
+
+    setPresenceByNodeId(nextByNodeId);
+    setCollectionPresence(nextCollectionPresence);
+    setFindingAidRemoteCursors(nextRemoteCursors);
+    setCatalogPresenceByField(nextCatalogByField);
+  }, [currentFocusState?.focusedId, presenceRefreshTick, seriesPresenceDocByRef, seriesRefs]);
+
+  useEffect(() => {
+    if (!currentFocusState) {
+      return;
+    }
+    const surface =
+      currentFocusState.mode === 'document'
+        ? 'findingAid'
+        : currentFocusState.mode === 'focus'
+          ? 'catalog'
+          : currentFocusState.mode;
+    const focusId = currentFocusState.focusedId ?? null;
+    const caret = surface === 'findingAid' ? findingAidCaretRef.current : null;
+    const catalogFieldId = surface === 'catalog' ? catalogFieldFocusRef.current : null;
+
+    for (const connection of presenceConnectionsRef.current.values()) {
+      connection.provider.setAwarenessField('user', localUser);
+      connection.provider.setAwarenessField('instanceId', awarenessInstanceIdRef.current);
+      connection.provider.setAwarenessField('focusId', focusId);
+      connection.provider.setAwarenessField('surface', surface);
+      connection.provider.setAwarenessField('cursorAnchor', caret?.anchor ?? null);
+      connection.provider.setAwarenessField('cursorHead', caret?.head ?? null);
+      connection.provider.setAwarenessField('catalogFieldId', catalogFieldId);
+      connection.provider.setAwarenessField('updatedAt', Date.now());
+    }
+    setPresenceRefreshTick((value) => value + 1);
+  }, [currentFocusState, localUser, presencePublishTick]);
 
   useEffect(() => {
     const handleToggleDebug = (event: KeyboardEvent) => {
@@ -377,6 +830,13 @@ export function App() {
 
     return readFocusedNode(activeSeriesDoc, currentFocusState.focusedId);
   }, [activeSeriesDoc, currentFocusState]);
+
+  const findingAidPresenceUsers = useMemo(() => {
+    if (!currentFocusState?.focusedId) {
+      return [] as PresenceEntry[];
+    }
+    return presenceByNodeId[currentFocusState.focusedId] ?? [];
+  }, [currentFocusState?.focusedId, presenceByNodeId]);
 
   const hierarchyHeadings = useMemo<HierarchyHeading[]>(() => {
     if (!activeHierarchy) {
@@ -449,6 +909,38 @@ export function App() {
     });
   }, []);
 
+  const upsertCanonicalCollectionEntry = useCallback(
+    (collectionId: string, patch: Partial<OrgCollectionIndexEntry>) => {
+      const map = canonicalMapRef.current;
+      if (!map) {
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const existing = getOrgIndexEntry(map, collectionId);
+      const fallbackTitle =
+        workspace.manifestsByCollectionId[collectionId]?.content?.[0]?.attrs?.title ?? 'Untitled Collection';
+
+      const nextEntry: OrgCollectionIndexEntry = {
+        collectionId,
+        title: patch.title ?? existing?.title ?? String(fallbackTitle),
+        createdBy: existing?.createdBy ?? currentUser.id,
+        createdAt: existing?.createdAt ?? nowIso,
+        updatedAt: patch.updatedAt ?? nowIso,
+        workflowStatus: patch.workflowStatus ?? existing?.workflowStatus ?? 'describe_started',
+        submittedAt:
+          patch.submittedAt !== undefined ? patch.submittedAt : existing?.submittedAt ?? null,
+        lastEditedBy: patch.lastEditedBy ?? currentUser.id,
+        isArchived: patch.isArchived ?? existing?.isArchived ?? false,
+        sourceObjectId: patch.sourceObjectId ?? existing?.sourceObjectId,
+        entryType: patch.entryType ?? existing?.entryType ?? 'guided',
+      };
+
+      upsertOrgIndexEntry(map, nextEntry);
+    },
+    [currentUser.id, workspace.manifestsByCollectionId],
+  );
+
   const updateCollectionManifest = useCallback(
     (collectionId: string, updater: (manifest: CollectionManifestDoc) => CollectionManifestDoc) => {
       setWorkspace((previous) => {
@@ -480,8 +972,14 @@ export function App() {
         };
         return next;
       });
+
+      upsertCanonicalCollectionEntry(collectionId, {
+        title,
+        updatedAt: new Date().toISOString(),
+        lastEditedBy: currentUser.id,
+      });
     },
-    [updateCollectionManifest],
+    [currentUser.id, updateCollectionManifest, upsertCanonicalCollectionEntry],
   );
 
   const setActiveSeriesDocName = useCallback((docName: string) => {
@@ -497,6 +995,26 @@ export function App() {
     });
   }, []);
 
+  const handleFindingAidCaretChange = useCallback((caret: { anchor: number; head: number } | null) => {
+    findingAidCaretRef.current = caret;
+    setPresencePublishTick((value) => value + 1);
+  }, []);
+
+  const handleCatalogFieldFocusChange = useCallback((fieldId: string | null) => {
+    catalogFieldFocusRef.current = fieldId;
+    setPresencePublishTick((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    if (currentFocusState?.mode !== 'document') {
+      findingAidCaretRef.current = null;
+    }
+    if (currentFocusState?.mode !== 'focus') {
+      catalogFieldFocusRef.current = null;
+    }
+    setPresencePublishTick((value) => value + 1);
+  }, [currentFocusState?.focusedId, currentFocusState?.mode]);
+
   const setActiveCollectionId = useCallback((collectionId: string) => {
     setWorkspace((previous) => {
       const manifest = previous.manifestsByCollectionId[collectionId];
@@ -509,7 +1027,10 @@ export function App() {
         refs.find((ref) => ref.docName === previous.activeSeriesDocName)?.docName ?? refs[0]?.docName ?? null;
 
       if (!nextActiveDocName) {
-        return previous;
+        return {
+          ...previous,
+          activeCollectionId: collectionId,
+        };
       }
 
       return {
@@ -554,6 +1075,18 @@ export function App() {
     setRenamingCollectionId(null);
     setCollectionTitleDraft('');
   }, []);
+
+  const setCollectionArchivedState = useCallback(
+    (collectionId: string, isArchived: boolean) => {
+      upsertCanonicalCollectionEntry(collectionId, {
+        isArchived,
+        updatedAt: new Date().toISOString(),
+        lastEditedBy: currentUser.id,
+      });
+      setCollectionTitleMenuOpenId(null);
+    },
+    [currentUser.id, upsertCanonicalCollectionEntry],
+  );
 
   const openSeriesInHierarchy = useCallback(
     (docName: string) => {
@@ -693,7 +1226,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [draggedDocName, targetDocName],
         suggestionIds: [],
@@ -787,7 +1320,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames,
         suggestionIds: [sid],
@@ -832,7 +1365,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: groupedSuggestions.map((entry) => entry.sid),
@@ -860,7 +1393,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [sid],
@@ -880,7 +1413,7 @@ export function App() {
 
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -897,7 +1430,7 @@ export function App() {
       focusHierarchyNode(nodeId);
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -914,7 +1447,7 @@ export function App() {
       focusHierarchyNode(nodeId);
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -938,7 +1471,7 @@ export function App() {
       focusHierarchyNode(insertedId);
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -958,7 +1491,7 @@ export function App() {
       }
       appendActionLog({
         opId: crypto.randomUUID(),
-        userId: LOCAL_USER.id,
+        userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
         suggestionIds: [],
@@ -985,7 +1518,7 @@ export function App() {
       sourceDoc,
       targetDoc,
       sid,
-      author: LOCAL_USER.id,
+      author: localUser.id,
       createdAt: Date.now(),
       payload: {
         source: {
@@ -1015,7 +1548,7 @@ export function App() {
 
     appendActionLog({
       opId: crypto.randomUUID(),
-      userId: LOCAL_USER.id,
+      userId: localUser.id,
       createdAt: Date.now(),
       docNames: [SERIES_A_DOC_NAME, SERIES_B_DOC_NAME],
       suggestionIds: [sid],
@@ -1049,6 +1582,35 @@ export function App() {
     });
     setExportPreview(JSON.stringify(doc, null, 2));
   }, [activeManifestDoc, workspace.seriesDocs]);
+
+  const getCatalogFieldPresence = useCallback((fieldId: string) => {
+    if (!focusedNode) {
+      return [] as PresenceEntry[];
+    }
+    return catalogPresenceByField[`${focusedNode.id}::${fieldId}`] ?? [];
+  }, [catalogPresenceByField, focusedNode]);
+
+  const renderCatalogFieldPresence = useCallback((fieldId: string) => {
+    const users = getCatalogFieldPresence(fieldId);
+    if (users.length === 0) {
+      return null;
+    }
+    return (
+      <span className="field-input__presence" title={users.map((entry) => entry.name).join(', ')}>
+        {users.slice(0, 3).map((entry) => (
+          <span
+            key={entry.presenceKey ?? entry.id}
+            className="field-input__presence-chip"
+            style={{ background: entry.color }}
+            aria-label={`${entry.name} editing`}
+          >
+            {entry.avatar ? <img src={entry.avatar} alt={entry.name} /> : (entry.name.trim().charAt(0) || '?').toUpperCase()}
+          </span>
+        ))}
+        {users.length > 3 ? <span className="field-input__presence-overflow">+{users.length - 3}</span> : null}
+      </span>
+    );
+  }, [getCatalogFieldPresence]);
 
   if (!activeManifestDoc || !activeSeriesDoc || !activeHierarchy || !currentFocusState) {
     return <div className="app-shell">No active series document loaded.</div>;
@@ -1087,20 +1649,13 @@ export function App() {
 
         <div className="header-actions">
           <p className="header-actions__institution">{activeInstitutionName}</p>
-          <button type="button" className="header-user" title="Logged in user (placeholder)">
-            <span className="header-user__avatar">{LOCAL_USER_INITIALS}</span>
+          <button type="button" className="header-user" title={`${localUser.name} (${currentUser.email})`}>
+            <span className="header-user__avatar">{localUserInitials}</span>
+          </button>
+          <button type="button" className="header-logout" onClick={onLogout}>
+            Log Out
           </button>
 
-          {debugMode ? (
-            <button
-              type="button"
-              className="debug-toggle debug-toggle--active"
-              onClick={() => setDebugMode(false)}
-              title="Debug mode is active (Ctrl/Cmd+Shift+D toggles)"
-            >
-              Debug On
-            </button>
-          ) : null}
         </div>
       </header>
 
@@ -1121,6 +1676,14 @@ export function App() {
                     value={collectionSearch}
                     onChange={(event) => setCollectionSearch(event.target.value)}
                   />
+                </label>
+                <label className="collection-filter-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showArchivedCollections}
+                    onChange={(event) => setShowArchivedCollections(event.target.checked)}
+                  />
+                  <span>Show archived</span>
                 </label>
                 <ul className="manifest-panel__series-list">
                   {filteredCollectionEntries.map((collection, index) => {
@@ -1223,6 +1786,17 @@ export function App() {
                                       >
                                         Rename
                                       </button>
+                                      <button
+                                        type="button"
+                                        role="menuitem"
+                                        className="title-menu__item"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setCollectionArchivedState(collection.collectionId, !collection.isArchived);
+                                        }}
+                                      >
+                                        {collection.isArchived ? 'Unarchive' : 'Archive'}
+                                      </button>
                                     </div>
                                   ) : null}
                                 </div>
@@ -1232,6 +1806,7 @@ export function App() {
                                   <small>
                                     {collection.activeCount} active {collection.activeCount === 1 ? 'user' : 'users'}
                                   </small>
+                                  {collection.isArchived ? <small>Archived</small> : null}
                                 </div>
                               ) : null}
                             </span>
@@ -1257,9 +1832,10 @@ export function App() {
                                 <button
                                   type="button"
                                   className="manifest-series__explore"
+                                  disabled={collection.seriesRefs.length === 0}
                                   onClick={() => openCollectionFromBrowser(collection.collectionId)}
                                 >
-                                  Explore Hierarchy
+                                  {collection.seriesRefs.length === 0 ? 'No Series Loaded' : 'Explore Hierarchy'}
                                 </button>
                               </div>
                             </div>
@@ -1396,6 +1972,19 @@ export function App() {
                 JSON View
               </button>
             </div>
+
+            <label className="debug-switch" title="Ctrl/Cmd+Shift+D toggles debug mode">
+              <span className="debug-switch__label">Debug</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={debugMode}
+                className={`debug-switch__track ${debugMode ? 'debug-switch__track--on' : ''}`}
+                onClick={() => setDebugMode((value) => !value)}
+              >
+                <span className="debug-switch__thumb" />
+              </button>
+            </label>
           </div>
 
           {currentFocusState.mode === 'document' ? (
@@ -1406,6 +1995,9 @@ export function App() {
                 focusedHierarchyId={currentFocusState.focusedId ?? undefined}
                 focusRequestKey={focusRequestKey}
                 onCursorHierarchyFocus={focusHierarchyNodeFromDocument}
+                onCaretChange={handleFindingAidCaretChange}
+                presenceUsers={findingAidPresenceUsers}
+                remoteCursors={findingAidRemoteCursors}
                 onChange={(nextContent) => updateActiveSeriesDoc((doc) => setSeriesBodyNodes(doc, nextContent))}
               />
 
@@ -1469,12 +2061,16 @@ export function App() {
 
                   {(focusedNode.level === 'series' ||
                     focusedNode.level === 'subseries' ||
+                    focusedNode.level === 'box' ||
                     focusedNode.level === 'file') ? (
                     <>
                       <section className="cms-section">
                         <h4 className="cms-section__title">Title</h4>
                         <label className="field-input" htmlFor="title-editor">
-                          <span>Title</span>
+                          <span>
+                            Title
+                            {renderCatalogFieldPresence('title')}
+                          </span>
                           <input
                             id="title-editor"
                             className="title-editor"
@@ -1483,6 +2079,8 @@ export function App() {
                               const title = event.target.value;
                               applyHierarchyMetadataPatch(focusedNode.id, { title });
                             }}
+                            onFocus={() => handleCatalogFieldFocusChange('title')}
+                            onBlur={() => handleCatalogFieldFocusChange(null)}
                           />
                         </label>
                       </section>
@@ -1500,9 +2098,12 @@ export function App() {
                                   value={metadataByKey[field.key] ?? ''}
                                   placeholder={field.placeholder}
                                   multiline={field.multiline}
+                                  presence={getCatalogFieldPresence(`meta:${field.key}`)}
                                   onChange={(nextValue) =>
                                     applyHierarchyMetadataPatch(focusedNode.id, { [field.key]: nextValue })
                                   }
+                                  onFocus={() => handleCatalogFieldFocusChange(`meta:${field.key}`)}
+                                  onBlur={() => handleCatalogFieldFocusChange(null)}
                                 />
                               ))}
                             </div>
@@ -1549,11 +2150,14 @@ export function App() {
                                   <FieldInput
                                     key={field.fieldId}
                                     field={field}
+                                    presence={getCatalogFieldPresence(`item:${field.fieldId}`)}
                                     onChange={(value) => {
                                       updateActiveSeriesDoc((doc) =>
                                         updateItemFieldValue(doc, focusedNode.id, field.fieldId, value),
                                       );
                                     }}
+                                    onFocus={() => handleCatalogFieldFocusChange(`item:${field.fieldId}`)}
+                                    onBlur={() => handleCatalogFieldFocusChange(null)}
                                   />
                                 ))}
                               </div>
@@ -1726,17 +2330,39 @@ export function App() {
 type FieldInputProps = {
   field: ItemFieldModel;
   onChange: (value: string | number | boolean | null) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  presence?: PresenceEntry[];
 };
 
-function FieldInput({ field, onChange }: FieldInputProps) {
+function FieldInput({ field, onChange, onFocus, onBlur, presence = [] }: FieldInputProps) {
   const selectOptions = getSelectOptions(field);
   const label = field.groupKey ? `${field.groupKey}.${field.key}` : field.key;
+  const presenceMarkup =
+    presence.length > 0 ? (
+      <span className="field-input__presence" title={presence.map((entry) => entry.name).join(', ')}>
+        {presence.slice(0, 3).map((entry) => (
+          <span
+            key={entry.presenceKey ?? entry.id}
+            className="field-input__presence-chip"
+            style={{ background: entry.color }}
+            aria-label={`${entry.name} editing`}
+          >
+            {entry.avatar ? <img src={entry.avatar} alt={entry.name} /> : (entry.name.trim().charAt(0) || '?').toUpperCase()}
+          </span>
+        ))}
+        {presence.length > 3 ? <span className="field-input__presence-overflow">+{presence.length - 3}</span> : null}
+      </span>
+    ) : null;
 
   if (field.valueType === 'boolean') {
     return (
       <label className="field-input field-input--boolean">
-        <span>{label}</span>
-        <input type="checkbox" checked={Boolean(field.value)} onChange={(event) => onChange(event.target.checked)} />
+        <span>
+          {label}
+          {presenceMarkup}
+        </span>
+        <input type="checkbox" checked={Boolean(field.value)} onChange={(event) => onChange(event.target.checked)} onFocus={onFocus} onBlur={onBlur} />
       </label>
     );
   }
@@ -1744,7 +2370,10 @@ function FieldInput({ field, onChange }: FieldInputProps) {
   if (field.valueType === 'number') {
     return (
       <label className="field-input">
-        <span>{label}</span>
+        <span>
+          {label}
+          {presenceMarkup}
+        </span>
         <input
           type="number"
           value={field.value == null ? '' : String(field.value)}
@@ -1760,6 +2389,8 @@ function FieldInput({ field, onChange }: FieldInputProps) {
               onChange(asNumber);
             }
           }}
+          onFocus={onFocus}
+          onBlur={onBlur}
         />
       </label>
     );
@@ -1768,8 +2399,11 @@ function FieldInput({ field, onChange }: FieldInputProps) {
   if (field.valueType === 'select' && selectOptions.length > 0) {
     return (
       <label className="field-input">
-        <span>{label}</span>
-        <select value={String(field.value ?? '')} onChange={(event) => onChange(event.target.value)}>
+        <span>
+          {label}
+          {presenceMarkup}
+        </span>
+        <select value={String(field.value ?? '')} onChange={(event) => onChange(event.target.value)} onFocus={onFocus} onBlur={onBlur}>
           {selectOptions.map((option) => (
             <option key={option} value={option}>
               {option}
@@ -1782,11 +2416,16 @@ function FieldInput({ field, onChange }: FieldInputProps) {
 
   return (
     <label className="field-input">
-      <span>{label}</span>
+      <span>
+        {label}
+        {presenceMarkup}
+      </span>
       <input
         type="text"
         value={field.value == null ? '' : String(field.value)}
         onChange={(event) => onChange(event.target.value)}
+        onFocus={onFocus}
+        onBlur={onBlur}
       />
     </label>
   );
@@ -1798,22 +2437,57 @@ type CmsMetadataInputProps = {
   placeholder: string;
   multiline?: boolean;
   onChange: (value: string) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  presence?: PresenceEntry[];
 };
 
-function CmsMetadataInput({ label, value, placeholder, multiline, onChange }: CmsMetadataInputProps) {
+function CmsMetadataInput({
+  label,
+  value,
+  placeholder,
+  multiline,
+  onChange,
+  onFocus,
+  onBlur,
+  presence = [],
+}: CmsMetadataInputProps) {
+  const presenceMarkup =
+    presence.length > 0 ? (
+      <span className="field-input__presence" title={presence.map((entry) => entry.name).join(', ')}>
+        {presence.slice(0, 3).map((entry) => (
+          <span
+            key={entry.presenceKey ?? entry.id}
+            className="field-input__presence-chip"
+            style={{ background: entry.color }}
+            aria-label={`${entry.name} editing`}
+          >
+            {entry.avatar ? <img src={entry.avatar} alt={entry.name} /> : (entry.name.trim().charAt(0) || '?').toUpperCase()}
+          </span>
+        ))}
+        {presence.length > 3 ? <span className="field-input__presence-overflow">+{presence.length - 3}</span> : null}
+      </span>
+    ) : null;
+
   if (multiline) {
     return (
       <label className="field-input field-input--multiline">
-        <span>{label}</span>
-        <textarea value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+        <span>
+          {label}
+          {presenceMarkup}
+        </span>
+        <textarea value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} onFocus={onFocus} onBlur={onBlur} />
       </label>
     );
   }
 
   return (
     <label className="field-input">
-      <span>{label}</span>
-      <input type="text" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+      <span>
+        {label}
+        {presenceMarkup}
+      </span>
+      <input type="text" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} onFocus={onFocus} onBlur={onBlur} />
     </label>
   );
 }
@@ -1939,12 +2613,15 @@ function readManifestSeriesRefs(manifest: CollectionManifestDoc): ManifestSeries
   return refs.sort((a, b) => a.order - b.order);
 }
 
-function renderCmsScreenTitle(level: 'series' | 'subseries' | 'file' | 'item'): string {
+function renderCmsScreenTitle(level: 'series' | 'subseries' | 'box' | 'file' | 'item'): string {
   if (level === 'series') {
     return 'Series Data Entry Screen';
   }
   if (level === 'subseries') {
     return 'Subseries Data Entry Screen';
+  }
+  if (level === 'box') {
+    return 'Box Data Entry Screen';
   }
   if (level === 'file') {
     return 'File Data Entry Screen';
@@ -1993,6 +2670,38 @@ function collectHierarchyIds(root: HierarchyNode): Set<string> {
 
   walk(root);
   return ids;
+}
+
+function createPlaceholderManifest(collectionId: string, title: string): CollectionManifestDoc {
+  return {
+    type: 'doc',
+    content: [
+      {
+        type: 'collectionManifest',
+        attrs: {
+          collectionId,
+          title,
+          dates: '',
+        },
+        content: [
+          {
+            type: 'collectionMeta',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Synced from canonical org index. Series documents are not loaded in this workspace yet.',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function createInitialWorkspace(): WorkspaceState {

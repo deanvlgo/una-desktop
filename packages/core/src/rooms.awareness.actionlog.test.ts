@@ -2,18 +2,40 @@ import { describe, expect, it } from 'vitest';
 
 import { InMemoryAgentActionLog } from './action-log';
 import { AwarenessStore } from './awareness';
-import { manifestDocName, parseDocName, seriesDocName } from './rooms';
+import {
+  collectionManifestDocName,
+  manifestDocName,
+  orgCollectionsDocName,
+  orgSeriesDocName,
+  parseDocName,
+  seriesDocName,
+} from './rooms';
 
 describe('rooms, awareness, action log', () => {
   it('builds and parses room names', () => {
     const manifest = manifestDocName('col-001');
     const series = seriesDocName('col-001', 'series-a');
+    const orgIndex = orgCollectionsDocName('org-1');
+    const orgManifest = collectionManifestDocName('org-1', 'col-001');
+    const orgSeries = orgSeriesDocName('org-1', 'col-001', 'series-a');
 
     expect(manifest).toBe('collection:col-001');
     expect(series).toBe('series:col-001:series-a');
+    expect(orgIndex).toBe('org:org-1:collections');
+    expect(orgManifest).toBe('collection:org-1:col-001');
+    expect(orgSeries).toBe('series:org-1:col-001:series-a');
 
     expect(parseDocName(manifest)).toEqual({ kind: 'manifest', collectionId: 'col-001' });
     expect(parseDocName(series)).toEqual({ kind: 'series', collectionId: 'col-001', seriesId: 'series-a' });
+    expect(parseDocName(orgIndex)).toEqual({ kind: 'org_index', orgId: 'org-1' });
+    expect(parseDocName(orgManifest)).toEqual({ kind: 'manifest', orgId: 'org-1', collectionId: 'col-001' });
+    expect(parseDocName(orgSeries)).toEqual({
+      kind: 'series',
+      orgId: 'org-1',
+      collectionId: 'col-001',
+      seriesId: 'series-a',
+    });
+    expect(parseDocName('series::collection:series')).toBeNull();
   });
 
   it('tracks per-doc awareness and focus chips', () => {
