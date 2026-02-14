@@ -102,6 +102,13 @@ type CmsFieldSpec = {
   multiline?: boolean;
 };
 
+type PhysicalLocationFieldSpec = {
+  key: 'building' | 'room' | 'range' | 'shelf' | 'position' | 'notes';
+  label: string;
+  placeholder: string;
+  multiline?: boolean;
+};
+
 type PresenceEntry = {
   id: string;
   name: string;
@@ -172,6 +179,15 @@ const CMS_FIELDS: CmsFieldSpec[] = [
     placeholder: 'https://example.org/object',
     section: 'Digital',
   },
+];
+
+const PHYSICAL_LOCATION_FIELDS: PhysicalLocationFieldSpec[] = [
+  { key: 'building', label: 'Building', placeholder: 'Main Archives Building' },
+  { key: 'room', label: 'Room', placeholder: 'Room 201' },
+  { key: 'range', label: 'Range', placeholder: 'Range A' },
+  { key: 'shelf', label: 'Shelf', placeholder: 'Shelf 03' },
+  { key: 'position', label: 'Position', placeholder: 'Position 12' },
+  { key: 'notes', label: 'Location Notes', placeholder: 'Any extra locator details', multiline: true },
 ];
 
 const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
@@ -247,6 +263,8 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const presenceConnectionCleanupRef = useRef<Map<string, () => void>>(new Map());
   const [presenceRefreshTick, setPresenceRefreshTick] = useState(0);
   const [presencePublishTick, setPresencePublishTick] = useState(0);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [actionLogStore] = useState(() => new InMemoryAgentActionLog());
 
@@ -822,6 +840,32 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     }
     window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
   }, [debugMode]);
+
+  useEffect(() => {
+    if (!userMenuOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target || !userMenuRef.current?.contains(target)) {
+        setUserMenuOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setUserMenuOpen(false);
+      }
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [userMenuOpen]);
 
   const focusedNode = useMemo(() => {
     if (!activeSeriesDoc || !currentFocusState) {
@@ -1622,6 +1666,14 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const groupedItemFields = focusedNode?.level === 'item' ? groupItemFieldsForCms(focusedNode.fields) : [];
   const cmsLevelColor = focusedNode ? CMS_LEVEL_COLORS[focusedNode.level] : '#6b7280';
   const metadataByKey = focusedNode?.metadata ?? {};
+  const getPhysicalLocationValue = (key: PhysicalLocationFieldSpec['key']) => {
+    const current = metadataByKey[key];
+    if (typeof current === 'string') {
+      return current;
+    }
+    const legacy = metadataByKey[`location_${key}`];
+    return typeof legacy === 'string' ? legacy : '';
+  };
   const activeCollectionTitle = String(manifestRoot.attrs?.title ?? 'Untitled Collection');
   const activeCollectionDescriptionText =
     activeCollectionDescription.length > 0 ? activeCollectionDescription : 'No collection description provided yet.';
@@ -1649,13 +1701,42 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
         <div className="header-actions">
           <p className="header-actions__institution">{activeInstitutionName}</p>
-          <button type="button" className="header-user" title={`${localUser.name} (${currentUser.email})`}>
-            <span className="header-user__avatar">{localUserInitials}</span>
-          </button>
-          <button type="button" className="header-logout" onClick={onLogout}>
-            Log Out
-          </button>
-
+          <div className="header-user-menu" ref={userMenuRef}>
+            <button
+              type="button"
+              className={`header-user ${userMenuOpen ? 'header-user--active' : ''}`}
+              title={`${localUser.name} (${currentUser.email})`}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+              onClick={() => setUserMenuOpen((value) => !value)}
+            >
+              <span className="header-user__avatar">{localUserInitials}</span>
+            </button>
+            {userMenuOpen ? (
+              <div className="header-menu" role="menu" aria-label="User menu">
+                <div className="header-menu__identity">
+                  <strong>{localUser.name}</strong>
+                  <span>{currentUser.email}</span>
+                </div>
+                <div className="header-menu__row">
+                  <span className="header-menu__label">Debug mode</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={debugMode}
+                    title="Ctrl/Cmd+Shift+D toggles debug mode"
+                    className={`debug-switch__track debug-switch__track--menu ${debugMode ? 'debug-switch__track--on' : ''}`}
+                    onClick={() => setDebugMode((value) => !value)}
+                  >
+                    <span className="debug-switch__thumb debug-switch__thumb--menu" />
+                  </button>
+                </div>
+                <button type="button" role="menuitem" className="header-menu__logout" onClick={onLogout}>
+                  Log Out
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -1973,18 +2054,6 @@ export function App({ currentUser, token, onLogout }: AppProps) {
               </button>
             </div>
 
-            <label className="debug-switch" title="Ctrl/Cmd+Shift+D toggles debug mode">
-              <span className="debug-switch__label">Debug</span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={debugMode}
-                className={`debug-switch__track ${debugMode ? 'debug-switch__track--on' : ''}`}
-                onClick={() => setDebugMode((value) => !value)}
-              >
-                <span className="debug-switch__thumb" />
-              </button>
-            </label>
           </div>
 
           {currentFocusState.mode === 'document' ? (
@@ -2058,6 +2127,30 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                       ) : null}
                     </div>
                   ) : null}
+
+                  <section className="cms-section">
+                    <h4 className="cms-section__title">Physical Location</h4>
+                    <div className="field-grid">
+                      {PHYSICAL_LOCATION_FIELDS.map((field) => (
+                        <CmsMetadataInput
+                          key={`${focusedNode.id}-location-${field.key}`}
+                          label={field.label}
+                          value={getPhysicalLocationValue(field.key)}
+                          placeholder={field.placeholder}
+                          multiline={field.multiline}
+                          presence={getCatalogFieldPresence(`meta:${field.key}`)}
+                          onChange={(nextValue) =>
+                            applyHierarchyMetadataPatch(focusedNode.id, {
+                              [field.key]: nextValue,
+                              [`location_${field.key}`]: '',
+                            })
+                          }
+                          onFocus={() => handleCatalogFieldFocusChange(`meta:${field.key}`)}
+                          onBlur={() => handleCatalogFieldFocusChange(null)}
+                        />
+                      ))}
+                    </div>
+                  </section>
 
                   {(focusedNode.level === 'series' ||
                     focusedNode.level === 'subseries' ||
