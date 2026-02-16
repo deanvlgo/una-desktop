@@ -65,6 +65,7 @@ import {
 } from './lib/canonicalIndex';
 import type { OrgCollectionIndexEntry } from './lib/canonicalRooms';
 import {
+  fetchSharedCollectionSeriesRefs,
   fetchSharedCollectionEntries,
   patchSharedCollectionEntry,
   sharedCollectionsApiEnabled,
@@ -1172,7 +1173,10 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     let cancelled = false;
     for (const collectionId of pendingCollectionIds) {
       const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
-      void fetchCollectionSeriesRefs({ token, collectionId, sourceObjectId })
+      const loadSeriesRefs = sharedCollectionsEnabled
+        ? fetchSharedCollectionSeriesRefs({ collectionId, sourceObjectId })
+        : fetchCollectionSeriesRefs({ token, collectionId, sourceObjectId });
+      void loadSeriesRefs
         .then((refs) => {
           if (cancelled || refs.length === 0) {
             return;
@@ -1225,7 +1229,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     return () => {
       cancelled = true;
     };
-  }, [collabEnabled, token, workspace.collectionOrder, workspace.manifestsByCollectionId]);
+  }, [collabEnabled, sharedCollectionsEnabled, token, workspace.collectionOrder, workspace.manifestsByCollectionId]);
 
   useEffect(() => {
     if (!collabEnabled) {

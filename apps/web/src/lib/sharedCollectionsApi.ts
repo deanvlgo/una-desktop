@@ -9,6 +9,10 @@ type SharedCollectionResponse = {
   collection?: SharedCollectionEntry;
 };
 
+type SharedCollectionSeriesRefsResponse = {
+  refs?: SharedCollectionSeriesRefEntry[];
+};
+
 type SharedCollectionEntry = {
   collectionId?: string;
   title?: string;
@@ -21,6 +25,24 @@ type SharedCollectionEntry = {
   isArchived?: boolean;
   sourceObjectId?: string;
   entryType?: string;
+};
+
+type SharedCollectionSeriesRefEntry = {
+  docName?: string;
+  seriesId?: string;
+  title?: string;
+  order?: number;
+  sourceLevel?: string | null;
+  updatedAt?: string;
+};
+
+export type SharedCollectionSeriesRef = {
+  docName: string;
+  seriesId: string;
+  title: string;
+  order: number;
+  sourceLevel: string | null;
+  updatedAt: string;
 };
 
 const WORKFLOW_STATUS_VALUES = new Set<OrgCollectionIndexEntry['workflowStatus']>([
@@ -107,6 +129,44 @@ function normalizeEntry(entry: SharedCollectionEntry): OrgCollectionIndexEntry |
   };
 }
 
+function normalizeSeriesRef(entry: SharedCollectionSeriesRefEntry, index: number): SharedCollectionSeriesRef | null {
+  const docName = typeof entry.docName === 'string' ? entry.docName.trim() : '';
+  if (!docName) {
+    return null;
+  }
+
+  const extractedSeriesId = docName.split(':').filter(Boolean).at(-1) ?? '';
+  const seriesId = typeof entry.seriesId === 'string' && entry.seriesId.trim().length > 0
+    ? entry.seriesId.trim()
+    : extractedSeriesId;
+  if (!seriesId) {
+    return null;
+  }
+
+  const title = typeof entry.title === 'string' && entry.title.trim().length > 0
+    ? entry.title.trim()
+    : seriesId;
+
+  const order = Number.isFinite(entry.order) && Number(entry.order) > 0
+    ? Math.floor(Number(entry.order))
+    : index + 1;
+
+  const sourceLevel = typeof entry.sourceLevel === 'string' && entry.sourceLevel.trim().length > 0
+    ? entry.sourceLevel.trim()
+    : null;
+
+  const updatedAt = normalizeIso(entry.updatedAt, new Date().toISOString());
+
+  return {
+    docName,
+    seriesId,
+    title,
+    order,
+    sourceLevel,
+    updatedAt,
+  };
+}
+
 export async function fetchSharedCollectionEntries(): Promise<Record<string, OrgCollectionIndexEntry>> {
   const response = await apiFetch('/api/una/v1/collections');
   if (!response.ok) {
@@ -152,4 +212,30 @@ export async function patchSharedCollectionEntry(args: {
     return null;
   }
   return normalizeEntry(payload.collection);
+}
+
+export async function fetchSharedCollectionSeriesRefs(args: {
+  collectionId: string;
+  sourceObjectId?: string;
+}): Promise<SharedCollectionSeriesRef[]> {
+  const sourceObjectId = args.sourceObjectId?.trim();
+  const searchParams = new URLSearchParams();
+  if (sourceObjectId && sourceObjectId !== args.collectionId) {
+    searchParams.set('sourceObjectId', sourceObjectId);
+  }
+  const suffix = searchParams.size > 0 ? `?${searchParams.toString()}` : '';
+
+  const response = await apiFetch(
+    `/api/una/v1/collections/${encodeURIComponent(args.collectionId)}/series-refs${suffix}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Shared collection series refs failed (${response.status})`);
+  }
+
+  const payload = (await response.json()) as SharedCollectionSeriesRefsResponse;
+  const refs = Array.isArray(payload.refs) ? payload.refs : [];
+  const normalized = refs
+    .map((entry, index) => normalizeSeriesRef(entry, index))
+    .filter((entry): entry is SharedCollectionSeriesRef => entry != null);
+  return normalized;
 }

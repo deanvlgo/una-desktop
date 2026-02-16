@@ -1,3 +1,5 @@
+import { apiFetch } from './api';
+
 export type HistorySnapshot = {
   id: number;
   createdAt: string;
@@ -20,6 +22,24 @@ export type CollectionSeriesRefCandidate = {
   sourceLevel: string | null;
   updatedAt: string;
 };
+
+function readEnabledFlag(raw: string | undefined): boolean {
+  if (!raw) {
+    return false;
+  }
+  const normalized = raw.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function useSharedHistoryApi(): boolean {
+  if (typeof window !== 'undefined') {
+    const query = new URLSearchParams(window.location.search).get('sharedCollectionsApi');
+    if (query != null) {
+      return query !== '0';
+    }
+  }
+  return readEnabledFlag(import.meta.env.VITE_USE_SHARED_COLLECTIONS_API);
+}
 
 function defaultCollabWsUrl(): string {
   if (typeof window === 'undefined') {
@@ -61,6 +81,24 @@ export async function fetchHistorySnapshots(args: {
   documentName: string;
   limit?: number;
 }): Promise<HistorySnapshot[]> {
+  if (useSharedHistoryApi()) {
+    const searchParams = new URLSearchParams();
+    searchParams.set('documentName', args.documentName);
+    searchParams.set('limit', String(args.limit ?? 30));
+    const response = await apiFetch(`/api/una/v1/history/snapshots?${searchParams.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${args.token}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to load history snapshots.');
+    }
+
+    const data = (await response.json()) as { snapshots?: HistorySnapshot[] };
+    return Array.isArray(data.snapshots) ? data.snapshots : [];
+  }
+
   const base = collabHttpBaseUrl();
   const url = new URL(`${base}/history/snapshots`);
   url.searchParams.set('documentName', args.documentName);
@@ -85,6 +123,25 @@ export async function revertHistorySnapshot(args: {
   documentName: string;
   snapshotId: number;
 }): Promise<void> {
+  if (useSharedHistoryApi()) {
+    const response = await apiFetch('/api/una/v1/history/revert', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${args.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        documentName: args.documentName,
+        snapshotId: args.snapshotId,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to revert snapshot.');
+    }
+    return;
+  }
+
   const base = collabHttpBaseUrl();
   const response = await fetch(`${base}/history/revert`, {
     method: 'POST',
