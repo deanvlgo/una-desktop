@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type ReactNode } from 'react';
 
 import {
   InMemoryAgentActionLog,
@@ -7,13 +7,13 @@ import {
   acceptSuggestionGroup,
   createPairedMoveProposals,
   evaluateMoveProposalStaleness,
-  exportCollection,
   listBlockSuggestions,
   moveSeriesRef,
   rejectMoveSubtreeCrossSeries,
   rejectSuggestionBlock,
   rejectSuggestionGroup,
   manifestDocName,
+  parseDocName,
   seriesDocName,
 } from '../../../packages/core/src';
 import type { AgentActionLogRecord, CollectionManifestDoc, PMNode, SeriesDoc } from '../../../src/contracts/types';
@@ -47,14 +47,23 @@ import {
   type ItemFieldModel,
 } from './lib/series';
 import { formatHierarchyNodeHeading, getHierarchyLevelLabel, toRomanNumeral } from './lib/hierarchyLabels';
-import {
-  CHARACTER_PROFILES,
-  DEFAULT_CHARACTER_KEY,
-  getCharacterProfileByKey,
-  type CharacterProfile,
-} from './lib/characters';
 import { userInitials } from './lib/user';
 import { CollabClient, buildCollabSeeds } from './lib/collab';
+import type { AuthenticatedUser } from './types/auth';
+import { fetchHistorySnapshots, revertHistorySnapshot, type HistorySnapshot } from './lib/history';
+import {
+  connectOrgIndex,
+  disconnectOrgIndex,
+  getOrgIndexEntry,
+  readOrgIndexEntries,
+  upsertOrgIndexEntry,
+} from './lib/canonicalIndex';
+import type { OrgCollectionIndexEntry } from './lib/canonicalRooms';
+import {
+  exportCollectionFindingAid,
+  exportSeriesFindingAid,
+  type ExportFormat,
+} from './lib/findingAidExport';
 
 type ManifestSeriesRef = {
   seriesId: string;
@@ -85,7 +94,7 @@ type LocalUser = {
   id: string;
   name: string;
   color: string;
-  avatar: string;
+  avatar?: string;
 };
 
 type PresenceMap = Record<string, Array<{ id: string; name: string; color: string; avatar?: string }>>;
@@ -174,45 +183,14 @@ function defaultCollabEnabled(): boolean {
   if (query != null) {
     return query !== '0';
   }
-
-  const host = window.location.hostname;
-  const localDevHost = host === 'localhost' || host === '127.0.0.1';
-  if (localDevHost) {
-    // Local dev should not spam failed websocket retries unless explicitly enabled.
-    return false;
-  }
-
   return true;
 }
 
-async function fetchCollabAuthToken(): Promise<string | null> {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  try {
-    const response = await fetch('/collab-token', {
-      method: 'GET',
-      cache: 'no-store',
-      credentials: 'same-origin',
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const token = (await response.text()).trim();
-    return token.length > 0 ? token : null;
-  } catch {
-    return null;
-  }
-}
-
-const COLLAB_WS_URL = (import.meta.env.VITE_HOCUSPOCUS_URL as string | undefined) ?? defaultCollabWsUrl();
+const COLLAB_WS_URL =
+  (import.meta.env.VITE_HOCUS_URL as string | undefined) ??
+  (import.meta.env.VITE_HOCUSPOCUS_URL as string | undefined) ??
+  defaultCollabWsUrl();
 const USER_COLOR_PALETTE = ['#ff5757', '#3b82f6', '#059669', '#a855f7', '#d97706', '#0f766e'];
-const USER_ID_STORAGE_KEY = 'archival-editor:user-id';
-const USER_NAME_STORAGE_KEY = 'archival-editor:user-name';
-const USER_CHARACTER_STORAGE_KEY = 'archival-editor:user-character';
 
 function pickUserColor(seed: string): string {
   if (seed.length === 0) {
@@ -227,138 +205,113 @@ function pickUserColor(seed: string): string {
   return USER_COLOR_PALETTE[hash % USER_COLOR_PALETTE.length] ?? USER_COLOR_PALETTE[0];
 }
 
-function readStoredCharacterKey(): string | null {
-  if (typeof window === 'undefined') {
-    return null;
+function displayNameForUser(user: AuthenticatedUser): string {
+  const first = user.first_name?.trim() ?? '';
+  const last = user.last_name?.trim() ?? '';
+  const fullName = `${first} ${last}`.trim();
+  if (fullName.length > 0) {
+    return fullName;
   }
-
-  const storedKey = window.sessionStorage.getItem(USER_CHARACTER_STORAGE_KEY);
-  if (!storedKey) {
-    return null;
-  }
-
-  return getCharacterProfileByKey(storedKey)?.key ?? null;
-}
-
-function createLocalUser(selectedCharacterKey: string, persistSelection: boolean): LocalUser {
-  const selectedCharacter =
-    getCharacterProfileByKey(selectedCharacterKey) ?? getCharacterProfileByKey(DEFAULT_CHARACTER_KEY);
-
-  if (!selectedCharacter) {
-    throw new Error('No character profiles configured.');
-  }
-
-  if (typeof window === 'undefined') {
-    return {
-      id: 'user-local',
-      name: selectedCharacter.name,
-      color: USER_COLOR_PALETTE[0],
-      avatar: selectedCharacter.avatar,
-    };
-  }
-
-  if (!persistSelection) {
-    return {
-      id: 'user-pending',
-      name: selectedCharacter.name,
-      color: USER_COLOR_PALETTE[0],
-      avatar: selectedCharacter.avatar,
-    };
-  }
-
-  const params = new URLSearchParams(window.location.search);
-  const queryName = params.get('user')?.trim();
-  const storedId = window.sessionStorage.getItem(USER_ID_STORAGE_KEY);
-  const storedName = window.sessionStorage.getItem(USER_NAME_STORAGE_KEY);
-  const id = storedId && storedId.length > 0 ? storedId : crypto.randomUUID();
-  const name =
-    queryName && queryName.length > 0
-      ? queryName
-      : storedName && storedName.length > 0
-        ? storedName
-        : selectedCharacter.name;
-
-  window.sessionStorage.setItem(USER_ID_STORAGE_KEY, id);
-  window.sessionStorage.setItem(USER_NAME_STORAGE_KEY, name);
-  window.sessionStorage.setItem(USER_CHARACTER_STORAGE_KEY, selectedCharacter.key);
-
-  return {
-    id,
-    name,
-    color: pickUserColor(id),
-    avatar: selectedCharacter.avatar,
-  };
+  return user.email;
 }
 
 const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
 
-export function App() {
-  const [selectedCharacterKey, setSelectedCharacterKey] = useState<string | null>(() => readStoredCharacterKey());
+type AppProps = {
+  currentUser: AuthenticatedUser;
+  token: string;
+  onLogout: () => void;
+};
+
+export function App({ currentUser, token, onLogout }: AppProps) {
   const [workspace, setWorkspace] = useState<WorkspaceState>(() => createInitialWorkspace());
   const [focusStateByDoc, setFocusStateByDoc] = useState<FocusStateMap>({});
   const [focusRequestKey, setFocusRequestKey] = useState(0);
   const [pendingDocumentJump, setPendingDocumentJump] = useState<{ id: string; docName: string } | null>(null);
-  const [collabAuthToken, setCollabAuthToken] = useState<string | null>(null);
-  const [collabAuthResolved, setCollabAuthResolved] = useState(false);
   const [railPanelMode, setRailPanelMode] = useState<RailPanelMode>('collections');
   const [collectionSearch, setCollectionSearch] = useState('');
+  const [showArchivedCollections, setShowArchivedCollections] = useState(false);
   const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null);
   const [collectionTitleMenuOpenId, setCollectionTitleMenuOpenId] = useState<string | null>(null);
   const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
   const [collectionTitleDraft, setCollectionTitleDraft] = useState('');
+  const [seriesExportMenuOpen, setSeriesExportMenuOpen] = useState(false);
   const [debugMode, setDebugMode] = useState(() => {
     if (typeof window === 'undefined') {
       return false;
     }
     return new URLSearchParams(window.location.search).get('debug') === '1';
   });
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [historyPanelCollapsed, setHistoryPanelCollapsed] = useState(false);
+  const [historySnapshots, setHistorySnapshots] = useState<HistorySnapshot[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyRevertingSnapshotId, setHistoryRevertingSnapshotId] = useState<number | null>(null);
   const [jsonViewDebugMode, setJsonViewDebugMode] = useState(false);
-  const [exportPreview, setExportPreview] = useState('');
   const [logVersion, setLogVersion] = useState(0);
   const [presenceByNodeId, setPresenceByNodeId] = useState<PresenceMap>({});
   const [collectionPresence, setCollectionPresence] = useState<Record<string, number>>({});
   const [catalogCursorByField, setCatalogCursorByField] = useState<CatalogCursorByField>({});
+  const [canonicalEntriesById, setCanonicalEntriesById] = useState<Record<string, OrgCollectionIndexEntry>>({});
+  const canonicalMapRef = useRef<import('yjs').Map<string> | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [actionLogStore] = useState(() => new InMemoryAgentActionLog());
   const collabClientRef = useRef<CollabClient | null>(null);
-  const applyingRemoteWorkspaceRef = useRef(false);
+  const collabInstanceIdRef = useRef<string>(`desktop-${crypto.randomUUID()}`);
   const lastFocusedSeriesDocRef = useRef<string | null>(null);
-  const hasCharacterSelected = selectedCharacterKey != null;
   const localUser = useMemo(
-    () => createLocalUser(selectedCharacterKey ?? DEFAULT_CHARACTER_KEY, hasCharacterSelected),
-    [hasCharacterSelected, selectedCharacterKey],
+    () => ({
+      id: currentUser.id,
+      name: displayNameForUser(currentUser),
+      color: pickUserColor(currentUser.id),
+      avatar: '',
+    }),
+    [currentUser],
   );
   const collabEnabled = useMemo(() => {
-    if (typeof window === 'undefined' || !hasCharacterSelected) {
+    if (typeof window === 'undefined') {
       return false;
     }
     return defaultCollabEnabled();
-  }, [hasCharacterSelected]);
+  }, []);
+  const orgId = currentUser.organization_id ?? undefined;
 
   useEffect(() => {
-    let cancelled = false;
-
-    if (!collabEnabled) {
-      setCollabAuthToken(null);
-      setCollabAuthResolved(false);
-      return () => {
-        cancelled = true;
-      };
+    if (!orgId || !token) {
+      setCanonicalEntriesById({});
+      return;
     }
 
-    setCollabAuthResolved(false);
-    fetchCollabAuthToken().then((token) => {
-      if (cancelled) {
+    const connection = connectOrgIndex(orgId, token);
+    canonicalMapRef.current = connection.map;
+    let isDisposed = false;
+
+    const refreshEntries = () => {
+      if (isDisposed) {
         return;
       }
-      setCollabAuthToken(token);
-      setCollabAuthResolved(true);
-    });
+
+      const entries = readOrgIndexEntries(connection.map);
+      const next: Record<string, OrgCollectionIndexEntry> = {};
+      for (const entry of entries) {
+        next[entry.collectionId] = entry;
+      }
+      setCanonicalEntriesById(next);
+    };
+
+    connection.map.observe(refreshEntries);
+    connection.provider.on('synced', refreshEntries);
+    refreshEntries();
 
     return () => {
-      cancelled = true;
+      isDisposed = true;
+      connection.map.unobserve(refreshEntries);
+      canonicalMapRef.current = null;
+      disconnectOrgIndex(connection);
     };
-  }, [collabEnabled]);
+  }, [orgId, token]);
 
   const activeManifestDoc = useMemo(
     () => workspace.manifestsByCollectionId[workspace.activeCollectionId] ?? null,
@@ -373,17 +326,176 @@ export function App() {
   const manifestDocNameByCollectionId = useMemo(() => {
     const map: Record<string, string> = {};
     for (const collectionId of workspace.collectionOrder) {
-      map[collectionId] = manifestDocName(collectionId);
+      map[collectionId] = orgId ? `collection:${orgId}:${collectionId}` : manifestDocName(collectionId);
     }
     return map;
-  }, [workspace.collectionOrder]);
+  }, [orgId, workspace.collectionOrder]);
 
   const seriesRefs = useMemo(() => {
     if (!activeManifestDoc) {
       return [] as ManifestSeriesRef[];
     }
-    return readManifestSeriesRefs(activeManifestDoc);
-  }, [activeManifestDoc]);
+    const normalized = normalizeManifestSeriesRefsForOrg(activeManifestDoc, workspace.activeCollectionId, orgId).manifest;
+    return readManifestSeriesRefs(normalized);
+  }, [activeManifestDoc, orgId, workspace.activeCollectionId]);
+  const historyDocName = workspace.activeSeriesDocName;
+
+  useEffect(() => {
+    if (!token || !historyDocName) {
+      setHistorySnapshots([]);
+      setHistoryError(null);
+      setHistoryLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    fetchHistorySnapshots({
+      token,
+      documentName: historyDocName,
+      limit: 30,
+    })
+      .then((rows) => {
+        if (cancelled) {
+          return;
+        }
+        setHistorySnapshots(rows);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        console.error('Failed loading history snapshots', error);
+        setHistoryError('Could not load history snapshots.');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setHistoryLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [historyDocName, token]);
+
+  useEffect(() => {
+    if (!token || !historyDocName) {
+      return;
+    }
+    const hasPendingSnapshots = historySnapshots.some(
+      (snapshot) => snapshot.diffStatus === 'pending' || snapshot.diffStatus === 'processing',
+    );
+    if (!hasPendingSnapshots) {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void fetchHistorySnapshots({
+        token,
+        documentName: historyDocName,
+        limit: 30,
+      })
+        .then((rows) => {
+          if (cancelled) {
+            return;
+          }
+          setHistorySnapshots(rows);
+        })
+        .catch((error) => {
+          if (cancelled) {
+            return;
+          }
+          console.error('Failed refreshing history snapshots', error);
+        });
+    }, 2200);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [historyDocName, historySnapshots, token]);
+
+  useEffect(() => {
+    const canonicalIds = Object.keys(canonicalEntriesById);
+    if (canonicalIds.length === 0) {
+      return;
+    }
+
+    setWorkspace((previous) => {
+      let hasChanges = false;
+      const nextManifests = { ...previous.manifestsByCollectionId };
+      const nextOrder = [...canonicalIds];
+
+      for (const collectionId of previous.collectionOrder) {
+        const canonical = canonicalEntriesById[collectionId];
+        if (!canonical) {
+          continue;
+        }
+
+        const manifest = previous.manifestsByCollectionId[collectionId];
+        if (!manifest) {
+          continue;
+        }
+
+        const currentTitle = String(manifest.content?.[0]?.attrs?.title ?? 'Untitled Collection');
+        if (currentTitle === canonical.title) {
+          continue;
+        }
+
+        const nextManifest = structuredClone(manifest);
+        const root = nextManifest.content[0];
+        root.attrs = {
+          ...(root.attrs ?? {}),
+          title: canonical.title,
+        };
+        nextManifests[collectionId] = nextManifest;
+        hasChanges = true;
+      }
+
+      for (const collectionId of canonicalIds) {
+        if (nextManifests[collectionId]) {
+          continue;
+        }
+
+        const canonical = canonicalEntriesById[collectionId];
+        if (!canonical) {
+          continue;
+        }
+
+        nextManifests[collectionId] = createPlaceholderManifest(collectionId, canonical.title);
+        hasChanges = true;
+      }
+
+      const canonicalOrder = nextOrder.sort((leftId, rightId) => {
+        const left = canonicalEntriesById[leftId];
+        const right = canonicalEntriesById[rightId];
+        const leftTitle = left?.title ?? String(nextManifests[leftId]?.content?.[0]?.attrs?.title ?? leftId);
+        const rightTitle = right?.title ?? String(nextManifests[rightId]?.content?.[0]?.attrs?.title ?? rightId);
+        return leftTitle.localeCompare(rightTitle, undefined, { sensitivity: 'base' });
+      });
+
+      const orderChanged =
+        canonicalOrder.length !== previous.collectionOrder.length ||
+        canonicalOrder.some((collectionId, index) => collectionId !== previous.collectionOrder[index]);
+
+      if (!hasChanges && !orderChanged) {
+        return previous;
+      }
+
+      const nextActiveCollectionId = canonicalOrder.includes(previous.activeCollectionId)
+        ? previous.activeCollectionId
+        : (canonicalOrder[0] ?? previous.activeCollectionId);
+
+      return {
+        ...previous,
+        activeCollectionId: nextActiveCollectionId,
+        manifestsByCollectionId: hasChanges ? nextManifests : previous.manifestsByCollectionId,
+        collectionOrder: orderChanged ? canonicalOrder : previous.collectionOrder,
+      };
+    });
+  }, [canonicalEntriesById]);
 
   const collectionEntries = useMemo(() => {
     return workspace.collectionOrder
@@ -394,19 +506,35 @@ export function App() {
         }
 
         const root = manifest.content[0];
+        const canonicalEntry = canonicalEntriesById[collectionId];
         const refs = readManifestSeriesRefs(manifest);
         const activeCount = refs.reduce((sum, ref) => sum + (collectionPresence[ref.docName] ?? 0), 0);
         return {
           collectionId,
-          title: String(root.attrs?.title ?? 'Untitled Collection'),
+          title: canonicalEntry?.title ?? String(root.attrs?.title ?? 'Untitled Collection'),
           description: readCollectionDescription(manifest),
           dates: String(root.attrs?.dates ?? ''),
           seriesRefs: refs,
           activeCount,
+          workflowStatus: canonicalEntry?.workflowStatus ?? 'describe_started',
+          submittedAt: canonicalEntry?.submittedAt ?? null,
+          isArchived: Boolean(canonicalEntry?.isArchived),
         };
       })
+      .filter((entry) => {
+        if (!entry) {
+          return false;
+        }
+        return showArchivedCollections ? true : !entry.isArchived;
+      })
       .filter((entry): entry is NonNullable<typeof entry> => entry != null);
-  }, [workspace.collectionOrder, workspace.manifestsByCollectionId, collectionPresence]);
+  }, [
+    canonicalEntriesById,
+    collectionPresence,
+    showArchivedCollections,
+    workspace.collectionOrder,
+    workspace.manifestsByCollectionId,
+  ]);
 
   const filteredCollectionEntries = useMemo(() => {
     const query = collectionSearch.trim().toLowerCase();
@@ -549,59 +677,169 @@ export function App() {
       return;
     }
 
-    applyingRemoteWorkspaceRef.current = true;
-
     setWorkspace((previous) => {
       let nextManifests = previous.manifestsByCollectionId;
       let nextSeriesDocs = previous.seriesDocs;
+      let nextActiveSeriesDocName = previous.activeSeriesDocName;
       let changed = false;
+      const legacyToCanonicalDocNames: Record<string, string> = {};
 
       const targetCollectionIds =
         changedDocName && changedDocName.startsWith('collection:')
-          ? previous.collectionOrder.filter((collectionId) => manifestDocName(collectionId) === changedDocName)
+          ? previous.collectionOrder.filter((collectionId) => {
+              const manifestRoomName = orgId ? `collection:${orgId}:${collectionId}` : manifestDocName(collectionId);
+              return manifestRoomName === changedDocName;
+            })
           : previous.collectionOrder;
 
       for (const collectionId of targetCollectionIds) {
-        const docName = manifestDocName(collectionId);
+        const docName = orgId ? `collection:${orgId}:${collectionId}` : manifestDocName(collectionId);
         const remoteManifest = collab.getDoc<CollectionManifestDoc>(docName);
         if (!remoteManifest) {
           continue;
         }
 
+        const normalizedRemote = normalizeManifestSeriesRefsForOrg(remoteManifest, collectionId, orgId);
+        Object.assign(legacyToCanonicalDocNames, normalizedRemote.legacyToCanonicalDocNames);
+
         const currentManifest = previous.manifestsByCollectionId[collectionId];
-        if (!currentManifest || JSON.stringify(currentManifest) !== JSON.stringify(remoteManifest)) {
+        if (!currentManifest || JSON.stringify(currentManifest) !== JSON.stringify(normalizedRemote.manifest)) {
           if (nextManifests === previous.manifestsByCollectionId) {
             nextManifests = { ...previous.manifestsByCollectionId };
           }
-          nextManifests[collectionId] = remoteManifest;
+          nextManifests[collectionId] = normalizedRemote.manifest;
           changed = true;
         }
       }
 
-      if (changedDocName && changedDocName.startsWith('series:')) {
-        const currentSeriesDoc = previous.seriesDocs[changedDocName];
-        const remoteSeriesDoc = collab.getDoc<SeriesDoc>(changedDocName);
-        if (currentSeriesDoc && remoteSeriesDoc && JSON.stringify(currentSeriesDoc) !== JSON.stringify(remoteSeriesDoc)) {
-          if (nextSeriesDocs === previous.seriesDocs) {
-            nextSeriesDocs = { ...previous.seriesDocs };
-          }
-          nextSeriesDocs[changedDocName] = remoteSeriesDoc;
-          changed = true;
+      for (const collectionId of previous.collectionOrder) {
+        const manifest = nextManifests[collectionId];
+        if (!manifest) {
+          continue;
         }
-      } else {
-        for (const [docName, currentSeriesDoc] of Object.entries(previous.seriesDocs)) {
-          const remoteSeriesDoc = collab.getDoc<SeriesDoc>(docName);
-          if (!remoteSeriesDoc) {
+
+        const normalizedManifest = normalizeManifestSeriesRefsForOrg(manifest, collectionId, orgId);
+        Object.assign(legacyToCanonicalDocNames, normalizedManifest.legacyToCanonicalDocNames);
+        if (!normalizedManifest.changed) {
+          continue;
+        }
+
+        if (nextManifests === previous.manifestsByCollectionId) {
+          nextManifests = { ...previous.manifestsByCollectionId };
+        }
+        nextManifests[collectionId] = normalizedManifest.manifest;
+        changed = true;
+      }
+
+      const canonicalToLegacyDocNames = new Map<string, string[]>();
+      for (const [legacyDocName, canonicalDocName] of Object.entries(legacyToCanonicalDocNames)) {
+        if (!legacyDocName || legacyDocName === canonicalDocName) {
+          continue;
+        }
+        const aliases = canonicalToLegacyDocNames.get(canonicalDocName) ?? [];
+        aliases.push(legacyDocName);
+        canonicalToLegacyDocNames.set(canonicalDocName, aliases);
+      }
+
+      const manifestsForSeriesRefs =
+        nextManifests === previous.manifestsByCollectionId ? previous.manifestsByCollectionId : nextManifests;
+
+      for (const [collectionId, manifest] of Object.entries(manifestsForSeriesRefs)) {
+        for (const ref of readManifestSeriesRefs(manifest)) {
+          if (!ref.docName) {
             continue;
           }
 
-          if (JSON.stringify(currentSeriesDoc) !== JSON.stringify(remoteSeriesDoc)) {
+          const legacyAliases = new Set<string>(canonicalToLegacyDocNames.get(ref.docName) ?? []);
+          const legacyDefault = seriesDocName(
+            collectionId,
+            ref.seriesId || extractSeriesIdFromDocName(ref.docName),
+          );
+          if (legacyDefault && legacyDefault !== ref.docName) {
+            legacyAliases.add(legacyDefault);
+          }
+
+          let remoteSeriesDoc = collab.getDoc<SeriesDoc>(ref.docName);
+          if (!remoteSeriesDoc) {
+            for (const legacyDocName of legacyAliases) {
+              const legacyDoc = collab.getDoc<SeriesDoc>(legacyDocName);
+              if (legacyDoc) {
+                remoteSeriesDoc = legacyDoc;
+                break;
+              }
+            }
+          }
+
+          let currentSeriesDoc = nextSeriesDocs[ref.docName];
+          if (!currentSeriesDoc) {
+            for (const legacyDocName of legacyAliases) {
+              if (!nextSeriesDocs[legacyDocName]) {
+                continue;
+              }
+              currentSeriesDoc = nextSeriesDocs[legacyDocName];
+              break;
+            }
+          }
+
+          if (remoteSeriesDoc && (!currentSeriesDoc || JSON.stringify(currentSeriesDoc) !== JSON.stringify(remoteSeriesDoc))) {
             if (nextSeriesDocs === previous.seriesDocs) {
               nextSeriesDocs = { ...previous.seriesDocs };
             }
-            nextSeriesDocs[docName] = remoteSeriesDoc;
+            nextSeriesDocs[ref.docName] = remoteSeriesDoc;
+            currentSeriesDoc = remoteSeriesDoc;
+            changed = true;
+          } else if (!currentSeriesDoc) {
+            if (nextSeriesDocs === previous.seriesDocs) {
+              nextSeriesDocs = { ...previous.seriesDocs };
+            }
+            nextSeriesDocs[ref.docName] = createPlaceholderSeriesDoc(
+              ref.seriesId || extractSeriesIdFromDocName(ref.docName),
+              ref.title,
+            );
+            currentSeriesDoc = nextSeriesDocs[ref.docName];
+            changed = true;
+          } else if (!nextSeriesDocs[ref.docName]) {
+            if (nextSeriesDocs === previous.seriesDocs) {
+              nextSeriesDocs = { ...previous.seriesDocs };
+            }
+            nextSeriesDocs[ref.docName] = currentSeriesDoc;
             changed = true;
           }
+
+          for (const legacyDocName of legacyAliases) {
+            if (legacyDocName === ref.docName) {
+              continue;
+            }
+            if (!nextSeriesDocs[legacyDocName]) {
+              continue;
+            }
+            if (nextSeriesDocs === previous.seriesDocs) {
+              nextSeriesDocs = { ...previous.seriesDocs };
+            }
+            delete nextSeriesDocs[legacyDocName];
+            if (nextActiveSeriesDocName === legacyDocName) {
+              nextActiveSeriesDocName = ref.docName;
+            }
+            changed = true;
+          }
+        }
+      }
+
+      const mappedActiveDocName = legacyToCanonicalDocNames[nextActiveSeriesDocName];
+      if (mappedActiveDocName && nextSeriesDocs[mappedActiveDocName] && mappedActiveDocName !== nextActiveSeriesDocName) {
+        nextActiveSeriesDocName = mappedActiveDocName;
+        changed = true;
+      }
+
+      if (!nextSeriesDocs[nextActiveSeriesDocName]) {
+        const activeManifest = manifestsForSeriesRefs[previous.activeCollectionId];
+        const fallbackDocName =
+          (activeManifest ? readManifestSeriesRefs(activeManifest).find((ref) => nextSeriesDocs[ref.docName])?.docName : null) ??
+          Object.keys(nextSeriesDocs)[0] ??
+          previous.activeSeriesDocName;
+        if (fallbackDocName !== nextActiveSeriesDocName) {
+          nextActiveSeriesDocName = fallbackDocName;
+          changed = true;
         }
       }
 
@@ -613,13 +851,11 @@ export function App() {
         ...previous,
         manifestsByCollectionId: nextManifests,
         seriesDocs: nextSeriesDocs,
+        activeSeriesDocName: nextActiveSeriesDocName,
       };
     });
 
-    queueMicrotask(() => {
-      applyingRemoteWorkspaceRef.current = false;
-    });
-  }, []);
+  }, [orgId]);
 
   const refreshPresenceFromCollab = useCallback(() => {
     const collab = collabClientRef.current;
@@ -671,14 +907,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!collabEnabled || !collabAuthResolved) {
+    if (!collabEnabled || !token) {
       return;
     }
 
     const collab = new CollabClient({
       url: COLLAB_WS_URL,
       user: localUser,
-      authToken: collabAuthToken,
+      instanceId: collabInstanceIdRef.current,
+      authToken: token,
       onDocChanged: applyWorkspaceFromCollab,
       onPresenceChanged: refreshPresenceFromCollab,
     });
@@ -687,16 +924,33 @@ export function App() {
     const snapshot = workspaceRef.current;
     const seedMap: Record<string, string> = {};
     for (const collectionId of snapshot.collectionOrder) {
-      seedMap[collectionId] = manifestDocName(collectionId);
+      seedMap[collectionId] = orgId ? `collection:${orgId}:${collectionId}` : manifestDocName(collectionId);
     }
 
     const seeds = buildCollabSeeds({
       manifestsByCollectionId: snapshot.manifestsByCollectionId,
-      seriesDocs: snapshot.seriesDocs,
+      // When org scoping is available, canonical series rooms are connected below.
+      // Avoid connecting legacy non-org room names to prevent split edit streams.
+      seriesDocs: orgId ? {} : snapshot.seriesDocs,
       manifestDocNameByCollectionId: seedMap,
     });
 
-    for (const seed of seeds) {
+    const canonicalSeriesSeeds = buildCanonicalSeriesSeeds({
+      manifestsByCollectionId: snapshot.manifestsByCollectionId,
+      seriesDocs: snapshot.seriesDocs,
+      orgId,
+    });
+    const allSeeds = [...seeds];
+    const connectedDocNames = new Set(allSeeds.map((seed) => seed.docName));
+    for (const seed of canonicalSeriesSeeds) {
+      if (connectedDocNames.has(seed.docName)) {
+        continue;
+      }
+      allSeeds.push(seed);
+      connectedDocNames.add(seed.docName);
+    }
+
+    for (const seed of allSeeds) {
       collab.connectRoom(seed);
     }
 
@@ -707,7 +961,7 @@ export function App() {
       collab.disconnectAll();
       collabClientRef.current = null;
     };
-  }, [applyWorkspaceFromCollab, collabAuthResolved, collabAuthToken, collabEnabled, localUser, refreshPresenceFromCollab]);
+  }, [applyWorkspaceFromCollab, collabEnabled, localUser, orgId, refreshPresenceFromCollab, token]);
 
   useEffect(() => {
     if (!collabEnabled) {
@@ -721,17 +975,34 @@ export function App() {
 
     const seeds = buildCollabSeeds({
       manifestsByCollectionId: workspace.manifestsByCollectionId,
-      seriesDocs: workspace.seriesDocs,
+      // When org scoping is available, canonical series rooms are connected below.
+      // Avoid connecting legacy non-org room names to prevent split edit streams.
+      seriesDocs: orgId ? {} : workspace.seriesDocs,
       manifestDocNameByCollectionId,
     });
 
-    for (const seed of seeds) {
+    const canonicalSeriesSeeds = buildCanonicalSeriesSeeds({
+      manifestsByCollectionId: workspace.manifestsByCollectionId,
+      seriesDocs: workspace.seriesDocs,
+      orgId,
+    });
+    const allSeeds = [...seeds];
+    const connectedDocNames = new Set(allSeeds.map((seed) => seed.docName));
+    for (const seed of canonicalSeriesSeeds) {
+      if (connectedDocNames.has(seed.docName)) {
+        continue;
+      }
+      allSeeds.push(seed);
+      connectedDocNames.add(seed.docName);
+    }
+
+    for (const seed of allSeeds) {
       collab.connectRoom(seed);
     }
-  }, [collabEnabled, manifestDocNameByCollectionId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
+  }, [collabEnabled, manifestDocNameByCollectionId, orgId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
 
   useEffect(() => {
-    if (!collabEnabled || applyingRemoteWorkspaceRef.current) {
+    if (!collabEnabled) {
       return;
     }
 
@@ -740,18 +1011,39 @@ export function App() {
       return;
     }
 
+    const seriesDocsToPublish = new Map<string, SeriesDoc>();
+
     for (const [collectionId, manifest] of Object.entries(workspace.manifestsByCollectionId)) {
       const roomName = manifestDocNameByCollectionId[collectionId];
       if (!roomName) {
         continue;
       }
-      collab.publishDoc(roomName, manifest);
+
+      const normalizedManifest = normalizeManifestSeriesRefsForOrg(manifest, collectionId, orgId).manifest;
+      collab.publishDoc(roomName, normalizedManifest);
+
+      for (const ref of readManifestSeriesRefs(normalizedManifest)) {
+        if (!ref.docName) {
+          continue;
+        }
+
+        const fallbackLegacyDocName = seriesDocName(
+          collectionId,
+          ref.seriesId || extractSeriesIdFromDocName(ref.docName),
+        );
+        const sourceDoc =
+          workspace.seriesDocs[ref.docName] ??
+          workspace.seriesDocs[fallbackLegacyDocName] ??
+          createPlaceholderSeriesDoc(ref.seriesId || extractSeriesIdFromDocName(ref.docName), ref.title);
+
+        seriesDocsToPublish.set(ref.docName, sourceDoc);
+      }
     }
 
-    for (const [docName, seriesDoc] of Object.entries(workspace.seriesDocs)) {
+    for (const [docName, seriesDoc] of seriesDocsToPublish.entries()) {
       collab.publishDoc(docName, seriesDoc);
     }
-  }, [collabEnabled, manifestDocNameByCollectionId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
+  }, [collabEnabled, manifestDocNameByCollectionId, orgId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
 
   useEffect(() => {
     if (!currentFocusState) {
@@ -817,6 +1109,32 @@ export function App() {
     }
     window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
   }, [debugMode]);
+
+  useEffect(() => {
+    if (!userMenuOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target || !userMenuRef.current?.contains(target)) {
+        setUserMenuOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setUserMenuOpen(false);
+      }
+    };
+
+    window.addEventListener('mousedown', handlePointerDown);
+    window.addEventListener('keydown', handleEscape);
+    return () => {
+      window.removeEventListener('mousedown', handlePointerDown);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [userMenuOpen]);
 
   const focusedNode = useMemo(() => {
     if (!activeSeriesDoc || !currentFocusState) {
@@ -925,6 +1243,40 @@ export function App() {
     [],
   );
 
+  const upsertCanonicalCollectionEntry = useCallback(
+    (
+      collectionId: string,
+      patch: {
+        title?: string;
+        workflowStatus?: OrgCollectionIndexEntry['workflowStatus'];
+        submittedAt?: string | null;
+        isArchived?: boolean;
+      },
+    ) => {
+      const map = canonicalMapRef.current;
+      if (!map) {
+        return;
+      }
+
+      const existing = getOrgIndexEntry(map, collectionId);
+      const nowIso = new Date().toISOString();
+      upsertOrgIndexEntry(map, {
+        collectionId,
+        title: patch.title ?? existing?.title ?? collectionId,
+        createdBy: existing?.createdBy ?? currentUser.id,
+        createdAt: existing?.createdAt ?? nowIso,
+        updatedAt: nowIso,
+        workflowStatus: patch.workflowStatus ?? existing?.workflowStatus ?? 'describe_started',
+        submittedAt: patch.submittedAt ?? existing?.submittedAt ?? null,
+        lastEditedBy: currentUser.id,
+        isArchived: patch.isArchived ?? existing?.isArchived ?? false,
+        sourceObjectId: existing?.sourceObjectId,
+        entryType: existing?.entryType,
+      });
+    },
+    [currentUser.id],
+  );
+
   const renameCollectionTitle = useCallback(
     (collectionId: string, title: string) => {
       updateCollectionManifest(collectionId, (manifest) => {
@@ -936,8 +1288,18 @@ export function App() {
         };
         return next;
       });
+      upsertCanonicalCollectionEntry(collectionId, { title });
     },
-    [updateCollectionManifest],
+    [updateCollectionManifest, upsertCanonicalCollectionEntry],
+  );
+
+  const setCollectionArchivedState = useCallback(
+    (collectionId: string, isArchived: boolean) => {
+      upsertCanonicalCollectionEntry(collectionId, {
+        isArchived,
+      });
+    },
+    [upsertCanonicalCollectionEntry],
   );
 
   const setActiveSeriesDocName = useCallback((docName: string) => {
@@ -1556,37 +1918,96 @@ export function App() {
     return Array.from(ids);
   }, [workspace.seriesDocs]);
 
-  const runExport = useCallback(() => {
-    if (!activeManifestDoc) {
-      return;
-    }
-
-    const doc = exportCollection({
-      manifestDoc: activeManifestDoc,
-      seriesDocsByDocName: workspace.seriesDocs,
-    });
-    setExportPreview(JSON.stringify(doc, null, 2));
-  }, [activeManifestDoc, workspace.seriesDocs]);
-
-  const selectCharacterProfile = useCallback((profile: CharacterProfile) => {
-    if (typeof window !== 'undefined') {
-      window.sessionStorage.setItem(USER_CHARACTER_STORAGE_KEY, profile.key);
-      const storedName = window.sessionStorage.getItem(USER_NAME_STORAGE_KEY);
-      if (!storedName || storedName.trim().length === 0) {
-        window.sessionStorage.setItem(USER_NAME_STORAGE_KEY, profile.name);
+  const runSeriesExport = useCallback(
+    (format: ExportFormat) => {
+      if (!activeManifestDoc || !activeSeriesDoc) {
+        return;
       }
-    }
-    setSelectedCharacterKey(profile.key);
-  }, []);
 
-  if (!hasCharacterSelected) {
-    return (
-      <CharacterPicker
-        profiles={CHARACTER_PROFILES}
-        onSelect={selectCharacterProfile}
-      />
-    );
-  }
+      const manifestRoot = activeManifestDoc.content[0];
+      const collectionTitle = String(manifestRoot.attrs?.title ?? 'Untitled Collection');
+      const activeSeriesTitle = activeSeriesRef?.title ?? String(activeHierarchy?.title ?? 'Untitled Series');
+
+      try {
+        exportSeriesFindingAid({
+          format,
+          input: {
+            collectionId: String(manifestRoot.attrs?.collectionId ?? workspace.activeCollectionId),
+            collectionTitle,
+            institutionName: readCollectionInstitution(activeManifestDoc),
+            collectionDescription: readCollectionDescription(activeManifestDoc),
+            seriesId: activeSeriesRef?.seriesId ?? workspace.activeSeriesDocName,
+            seriesTitle: activeSeriesTitle,
+            seriesDoc: activeSeriesDoc,
+          },
+        });
+        setSeriesExportMenuOpen(false);
+      } catch (error) {
+        console.error('Series export failed', error);
+        window.alert('Series export failed. Check the console for details.');
+      }
+    },
+    [
+      activeHierarchy?.title,
+      activeManifestDoc,
+      activeSeriesDoc,
+      activeSeriesRef?.seriesId,
+      activeSeriesRef?.title,
+      workspace.activeCollectionId,
+      workspace.activeSeriesDocName,
+    ],
+  );
+
+  const runCollectionExport = useCallback(
+    (collectionId: string, format: ExportFormat) => {
+      const manifest = workspace.manifestsByCollectionId[collectionId];
+      if (!manifest) {
+        return;
+      }
+
+      const refs = readManifestSeriesRefs(manifest);
+      const orderedSeries = refs
+        .map((ref) => {
+          const doc = workspace.seriesDocs[ref.docName];
+          if (!doc) {
+            return null;
+          }
+          return {
+            seriesId: ref.seriesId,
+            seriesTitle: ref.title,
+            docName: ref.docName,
+            seriesDoc: doc,
+          };
+        })
+        .filter((entry): entry is NonNullable<typeof entry> => entry != null);
+
+      if (orderedSeries.length === 0) {
+        window.alert('No loaded series were found for this collection.');
+        return;
+      }
+
+      const manifestRoot = manifest.content[0];
+      const collectionTitle = String(manifestRoot.attrs?.title ?? 'Untitled Collection');
+
+      try {
+        exportCollectionFindingAid({
+          format,
+          input: {
+            collectionId: String(manifestRoot.attrs?.collectionId ?? collectionId),
+            collectionTitle,
+            institutionName: readCollectionInstitution(manifest),
+            collectionDescription: readCollectionDescription(manifest),
+            series: orderedSeries,
+          },
+        });
+        setCollectionTitleMenuOpenId(null);
+      } catch (error) {
+        console.error('Collection export failed', error);
+        window.alert('Collection export failed. Check the console for details.');
+      }
+    },
+    [workspace.manifestsByCollectionId, workspace.seriesDocs],
+  );
 
   if (!activeManifestDoc || !activeSeriesDoc || !activeHierarchy || !currentFocusState) {
     return <div className="app-shell">No active series document loaded.</div>;
@@ -1606,6 +2027,39 @@ export function App() {
   const focusedCatalogHeading = focusedNode
     ? formatHierarchyNodeHeading(focusedNode.level, focusedNodeOrdinal, focusedNode.title)
     : '';
+
+  const handleHistoryRevert = useCallback(
+    async (snapshotId: number) => {
+      if (!historyDocName || historyRevertingSnapshotId != null) {
+        return;
+      }
+      setHistoryRevertingSnapshotId(snapshotId);
+      setHistoryError(null);
+      try {
+        await revertHistorySnapshot({
+          token,
+          documentName: historyDocName,
+          snapshotId,
+        });
+        const refreshed = await fetchHistorySnapshots({
+          token,
+          documentName: historyDocName,
+          limit: 30,
+        });
+        setHistorySnapshots(refreshed);
+        // Force a clean client doc bootstrap after server-side revert.
+        window.setTimeout(() => {
+          window.location.reload();
+        }, 150);
+      } catch (error) {
+        console.error('Failed to revert snapshot', error);
+        setHistoryError('Could not revert snapshot.');
+      } finally {
+        setHistoryRevertingSnapshotId(null);
+      }
+    },
+    [historyDocName, historyRevertingSnapshotId, token],
+  );
 
   return (
     <div className="app-shell">
@@ -1630,15 +2084,48 @@ export function App() {
 
         <div className="header-actions">
           <p className="header-actions__institution">{activeInstitutionName}</p>
-          <button type="button" className="header-user" title="Logged in user (placeholder)">
-            <span className="header-user__avatar">
-              {localUser.avatar ? (
-                <img src={localUser.avatar} alt={`${localUser.name} avatar`} className="header-user__avatar-image" />
-              ) : (
-                userInitials(localUser.name)
-              )}
-            </span>
-          </button>
+          <div className="header-user-menu" ref={userMenuRef}>
+            <button
+              type="button"
+              className={`header-user ${userMenuOpen ? 'header-user--active' : ''}`}
+              title={localUser.name}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
+              onClick={() => setUserMenuOpen((value) => !value)}
+            >
+              <span className="header-user__avatar">
+                {localUser.avatar ? (
+                  <img src={localUser.avatar} alt={`${localUser.name} avatar`} className="header-user__avatar-image" />
+                ) : (
+                  userInitials(localUser.name)
+                )}
+              </span>
+            </button>
+            {userMenuOpen ? (
+              <div className="header-menu" role="menu" aria-label="User menu">
+                <div className="header-menu__identity">
+                  <strong>{localUser.name}</strong>
+                  <span>{currentUser.email}</span>
+                </div>
+                <div className="header-menu__row">
+                  <span className="header-menu__label">Debug mode</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={jsonViewDebugMode}
+                    title={`Debug mode ${jsonViewDebugMode ? 'on' : 'off'}`}
+                    className={`debug-toggle__switch ${jsonViewDebugMode ? 'debug-toggle__switch--on' : ''}`}
+                    onClick={() => setJsonViewDebugMode((value) => !value)}
+                  >
+                    <span className="debug-toggle__thumb" />
+                  </button>
+                </div>
+                <button type="button" role="menuitem" className="header-menu__logout" onClick={onLogout}>
+                  Log Out
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -1660,17 +2147,27 @@ export function App() {
                     onChange={(event) => setCollectionSearch(event.target.value)}
                   />
                 </label>
+                <label className="collection-filter-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showArchivedCollections}
+                    onChange={(event) => setShowArchivedCollections(event.target.checked)}
+                  />
+                  <span>Show archived</span>
+                </label>
                 <ul className="manifest-panel__series-list">
                   {filteredCollectionEntries.map((collection, index) => {
                     const isExpanded = expandedCollectionId === collection.collectionId;
                     return (
                       <li key={collection.collectionId}>
                         <div
-                          className={
-                            workspace.activeCollectionId === collection.collectionId
-                              ? 'manifest-series manifest-series--active'
-                              : 'manifest-series'
-                          }
+                          className={[
+                            'manifest-series',
+                            workspace.activeCollectionId === collection.collectionId ? 'manifest-series--active' : '',
+                            collectionTitleMenuOpenId === collection.collectionId ? 'manifest-series--menu-open' : '',
+                          ]
+                            .filter(Boolean)
+                            .join(' ')}
                         >
                           <div
                             className="manifest-series__open"
@@ -1723,6 +2220,7 @@ export function App() {
                                     {collection.title}
                                   </span>
                                 )}
+                                {collection.isArchived ? <small>Archived</small> : null}
 
                                 <div className="title-menu title-menu--inline">
                                   <button
@@ -1760,6 +2258,64 @@ export function App() {
                                         }}
                                       >
                                         Rename
+                                      </button>
+                                      <button
+                                        type="button"
+                                        role="menuitem"
+                                        className="title-menu__item"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setCollectionArchivedState(collection.collectionId, !collection.isArchived);
+                                          setCollectionTitleMenuOpenId(null);
+                                        }}
+                                      >
+                                        {collection.isArchived ? 'Unarchive' : 'Archive'}
+                                      </button>
+                                      <div className="title-menu__divider" />
+                                      <p className="title-menu__group-label">Export</p>
+                                      <button
+                                        type="button"
+                                        role="menuitem"
+                                        className="title-menu__item"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          runCollectionExport(collection.collectionId, 'word');
+                                        }}
+                                      >
+                                        Export Word
+                                      </button>
+                                      <button
+                                        type="button"
+                                        role="menuitem"
+                                        className="title-menu__item"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          runCollectionExport(collection.collectionId, 'ead');
+                                        }}
+                                      >
+                                        Export EAD XML
+                                      </button>
+                                      <button
+                                        type="button"
+                                        role="menuitem"
+                                        className="title-menu__item"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          runCollectionExport(collection.collectionId, 'html');
+                                        }}
+                                      >
+                                        Export HTML
+                                      </button>
+                                      <button
+                                        type="button"
+                                        role="menuitem"
+                                        className="title-menu__item"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          runCollectionExport(collection.collectionId, 'pdf');
+                                        }}
+                                      >
+                                        Export PDF
                                       </button>
                                     </div>
                                   ) : null}
@@ -1830,10 +2386,59 @@ export function App() {
                   </div>
                 </div>
 
-                <p className="hierarchy-panel__hint">
-                  Editing series: {activeSeriesRef?.title ?? workspace.activeSeriesDocName} ({activeSeriesPresenceCount}{' '}
-                  active {activeSeriesPresenceCount === 1 ? 'user' : 'users'})
-                </p>
+                <div className="hierarchy-panel__hint-row">
+                  <p className="hierarchy-panel__hint">
+                    Editing series: {activeSeriesRef?.title ?? workspace.activeSeriesDocName} ({activeSeriesPresenceCount}{' '}
+                    active {activeSeriesPresenceCount === 1 ? 'user' : 'users'})
+                  </p>
+                  <div className="title-menu title-menu--inline">
+                    <button
+                      type="button"
+                      className="title-menu__trigger title-menu__trigger--text"
+                      aria-label="Export active series"
+                      aria-expanded={seriesExportMenuOpen}
+                      onClick={() => setSeriesExportMenuOpen((current) => !current)}
+                    >
+                      Export Series
+                    </button>
+                    {seriesExportMenuOpen ? (
+                      <div className="title-menu__panel title-menu__panel--inline" role="menu">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="title-menu__item"
+                          onClick={() => runSeriesExport('word')}
+                        >
+                          Export Word
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="title-menu__item"
+                          onClick={() => runSeriesExport('ead')}
+                        >
+                          Export EAD XML
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="title-menu__item"
+                          onClick={() => runSeriesExport('html')}
+                        >
+                          Export HTML
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="title-menu__item"
+                          onClick={() => runSeriesExport('pdf')}
+                        >
+                          Export PDF
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
                 <FindingAidHierarchy
                   root={activeHierarchy}
                   focusState={currentFocusState}
@@ -1935,19 +2540,6 @@ export function App() {
                 </button>
               ) : null}
             </div>
-            <button
-              type="button"
-              className={jsonViewDebugMode ? 'debug-toggle debug-toggle--active' : 'debug-toggle'}
-              aria-pressed={jsonViewDebugMode}
-              onClick={() => setJsonViewDebugMode((value) => !value)}
-              title={`Debug mode ${jsonViewDebugMode ? 'on' : 'off'}`}
-            >
-              <span className="debug-toggle__label">Debug</span>
-              <span className="debug-toggle__switch" aria-hidden="true">
-                <span className="debug-toggle__thumb" />
-              </span>
-              <span className="debug-toggle__state">{jsonViewDebugMode ? 'On' : 'Off'}</span>
-            </button>
           </div>
 
           {visibleMode === 'document' ? (
@@ -2250,13 +2842,6 @@ export function App() {
               {blockSuggestions.length === 0 ? <p>No pending block suggestions in this series.</p> : null}
             </div>
 
-            <div className="export-block">
-              <button type="button" onClick={runExport}>
-                Export Monolithic Collection
-              </button>
-              {exportPreview ? <pre>{exportPreview}</pre> : null}
-            </div>
-
               <div className="action-log">
                 <h3>Agent Action Log</h3>
                 {logEntries.map((entry) => (
@@ -2269,41 +2854,147 @@ export function App() {
             </section>
           ) : null}
         </main>
+        <aside className={historyPanelCollapsed ? 'workspace-context workspace-context--collapsed' : 'workspace-context'}>
+          <section
+            className={historyPanelCollapsed ? 'panel revisions-panel revisions-panel--collapsed' : 'panel revisions-panel'}
+            aria-label="Series revision history"
+          >
+            {historyPanelCollapsed ? (
+              <button
+                type="button"
+                className="revisions-panel__collapsed-tab"
+                onClick={() => setHistoryPanelCollapsed(false)}
+                aria-label="Expand revisions panel"
+                title="Expand revisions"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M12 5.5a6.5 6.5 0 1 0 6.38 7.75 1 1 0 1 1 1.96.38A8.5 8.5 0 1 1 12 3.5h.25l-1.04-1.04a1 1 0 0 1 1.42-1.42l2.75 2.75a1 1 0 0 1 0 1.42l-2.75 2.75a1 1 0 1 1-1.42-1.42L12.25 5.5H12Z"
+                    fill="currentColor"
+                  />
+                  <path d="M12 7.75a1 1 0 0 1 1 1v2.62l1.88 1.13a1 1 0 0 1-1.03 1.72l-2.37-1.42a1 1 0 0 1-.48-.86V8.75a1 1 0 0 1 1-1Z" fill="currentColor" />
+                </svg>
+              </button>
+            ) : (
+              <>
+                <div className="revisions-panel__header">
+                  <div className="revisions-panel__heading">
+                    <h3>Revisions</h3>
+                    <p>{activeSeriesRef?.title ?? historyDocName}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="revisions-panel__toggle"
+                    onClick={() => setHistoryPanelCollapsed(true)}
+                    aria-label="Collapse revisions panel"
+                    title="Collapse"
+                  >
+                    ▶
+                  </button>
+                </div>
+
+                {historyLoading ? <p className="revisions-panel__status">Loading revisions…</p> : null}
+                {historyError ? <p className="revisions-panel__error">{historyError}</p> : null}
+                {!historyLoading && historySnapshots.length === 0 ? (
+                  <p className="revisions-panel__status">No revisions yet for this finding aid.</p>
+                ) : null}
+                {!historyLoading && historySnapshots.length > 0 ? (
+                  <ul className="revisions-panel__list">
+                    {historySnapshots.map((snapshot) => (
+                      <li key={snapshot.id} className="revisions-panel__item">
+                        <span className="revisions-panel__id">rev {snapshot.id}</span>
+                        {snapshot.revertedFromSnapshotId != null ? (
+                          <span className="revisions-panel__reverted-tag">reverted from rev {snapshot.revertedFromSnapshotId}</span>
+                        ) : null}
+                        <div className="revisions-panel__item-top">
+                          <strong className="revisions-panel__date">{new Date(snapshot.createdAt).toLocaleString()}</strong>
+                          <button
+                            type="button"
+                            className="revisions-panel__revert"
+                            disabled={historyRevertingSnapshotId != null}
+                            onClick={() => handleHistoryRevert(snapshot.id)}
+                          >
+                            {historyRevertingSnapshotId === snapshot.id ? 'Reverting…' : 'Revert'}
+                          </button>
+                        </div>
+                        <div className="revisions-panel__changes">{renderRevisionSummaryMarkdown(snapshot.summary ?? '', snapshot.diffStatus)}</div>
+                        {snapshot.diffStatus === 'failed' && snapshot.diffError ? (
+                          <small className="revisions-panel__diff-error">{snapshot.diffError}</small>
+                        ) : null}
+                        <small className="revisions-panel__meta">
+                          {snapshot.actorType ?? 'human'}
+                          {snapshot.actorId ? ` · ${snapshot.actorId}` : ''}
+                          {snapshot.source ? ` · ${snapshot.source}` : ''}
+                        </small>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            )}
+          </section>
+        </aside>
       </div>
     </div>
   );
 }
 
-type CharacterPickerProps = {
-  profiles: CharacterProfile[];
-  onSelect: (profile: CharacterProfile) => void;
-};
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.filter(Boolean).map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+      return (
+        <strong key={`md-bold-${index}`} className="revisions-panel__md-strong">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return (
+        <code key={`md-code-${index}`} className="revisions-panel__md-code">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return <span key={`md-text-${index}`}>{part}</span>;
+  });
+}
 
-function CharacterPicker({ profiles, onSelect }: CharacterPickerProps) {
-  return (
-    <div className="character-picker">
-      <section className="character-picker__card" aria-label="Choose character">
-        <p className="character-picker__kicker">Una Collaborative Editor</p>
-        <h1 className="character-picker__title">Choose your archivist</h1>
-        <p className="character-picker__hint">Select an archivist avatar to enter the shared finding aid workspace.</p>
-        <div className="character-picker__grid">
-          {profiles.map((profile) => (
-            <button
-              key={profile.key}
-              type="button"
-              className="character-picker__option"
-              onClick={() => onSelect(profile)}
-            >
-              <span className="character-picker__avatar-wrap">
-                <img src={profile.avatar} alt={`${profile.name} avatar`} className="character-picker__avatar" />
-              </span>
-              <span className="character-picker__name">{profile.name}</span>
-            </button>
-          ))}
-        </div>
-      </section>
-    </div>
-  );
+function renderRevisionSummaryMarkdown(summary: string, diffStatus: 'pending' | 'processing' | 'done' | 'failed' | null): ReactNode {
+  if (diffStatus === 'pending' || diffStatus === 'processing') {
+    return <p className="revisions-panel__changes-paragraph">Analyzing revision changes…</p>;
+  }
+
+  const normalized = summary.trim();
+  if (!normalized) {
+    return (
+      <ul className="revisions-panel__changes-list">
+        <li>
+          <strong className="revisions-panel__md-strong">Finding Aid:</strong> Updated finding aid content.
+        </li>
+        <li>
+          <strong className="revisions-panel__md-strong">Catalog:</strong> No direct catalog field changes detected.
+        </li>
+      </ul>
+    );
+  }
+
+  const lines = normalized
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const bulletLines = lines.filter((line) => line.startsWith('- '));
+  if (bulletLines.length > 0) {
+    return (
+      <ul className="revisions-panel__changes-list">
+        {bulletLines.map((line, index) => (
+          <li key={`summary-bullet-${index}`}>{renderInlineMarkdown(line.slice(2))}</li>
+        ))}
+      </ul>
+    );
+  }
+
+  return <p className="revisions-panel__changes-paragraph">{renderInlineMarkdown(normalized)}</p>;
 }
 
 type FieldInputProps = {
@@ -2891,6 +3582,108 @@ function readPlainText(node: PMNode): string {
   return node.content.map((entry) => readPlainText(entry as PMNode)).join(' ');
 }
 
+function deriveSeriesId(attrs: Record<string, unknown>, fallbackDocName: string, fallbackIndex: number): string {
+  const rawSeriesId = String(attrs.seriesId ?? '').trim();
+  if (rawSeriesId.length > 0) {
+    return rawSeriesId;
+  }
+
+  const parsed = parseDocName(fallbackDocName);
+  if (parsed?.kind === 'series' && parsed.seriesId) {
+    return parsed.seriesId;
+  }
+
+  const extracted = extractSeriesIdFromDocName(fallbackDocName);
+  if (extracted.length > 0) {
+    return extracted;
+  }
+
+  return `series-${fallbackIndex + 1}`;
+}
+
+function canonicalSeriesDocNameForRef(args: {
+  collectionId: string;
+  seriesId: string;
+  docName: string;
+  orgId?: string;
+}): string {
+  if (!args.orgId) {
+    if (args.docName.trim().length > 0) {
+      return args.docName;
+    }
+    return seriesDocName(args.collectionId, args.seriesId);
+  }
+
+  return seriesDocName(args.collectionId, args.seriesId, args.orgId);
+}
+
+function normalizeManifestSeriesRefsForOrg(
+  manifest: CollectionManifestDoc,
+  collectionId: string,
+  orgId?: string,
+): {
+  manifest: CollectionManifestDoc;
+  changed: boolean;
+  legacyToCanonicalDocNames: Record<string, string>;
+} {
+  const root = manifest.content[0];
+  const nodes = root.content ?? [];
+  const legacyToCanonicalDocNames: Record<string, string> = {};
+
+  let nextManifest: CollectionManifestDoc | null = null;
+
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    if (node.type !== 'seriesRef') {
+      continue;
+    }
+
+    const attrs = ((node as PMNode).attrs ?? {}) as Record<string, unknown>;
+    const rawDocName = String(attrs.docName ?? '').trim();
+    const seriesId = deriveSeriesId(attrs, rawDocName, index);
+    const canonicalDocName = canonicalSeriesDocNameForRef({
+      collectionId,
+      seriesId,
+      docName: rawDocName,
+      orgId,
+    });
+    const nextOrder = Number(attrs.order ?? index + 1);
+    const currentOrder = Number(attrs.order ?? 0);
+
+    if (rawDocName.length > 0 && rawDocName !== canonicalDocName) {
+      legacyToCanonicalDocNames[rawDocName] = canonicalDocName;
+    }
+
+    const needsUpdate =
+      rawDocName !== canonicalDocName ||
+      String(attrs.seriesId ?? '') !== seriesId ||
+      currentOrder !== nextOrder;
+
+    if (!needsUpdate) {
+      continue;
+    }
+
+    if (!nextManifest) {
+      nextManifest = structuredClone(manifest);
+    }
+
+    const nextRoot = nextManifest.content[0];
+    const nextNode = nextRoot.content[index] as PMNode;
+    nextNode.attrs = {
+      ...(nextNode.attrs ?? {}),
+      seriesId,
+      docName: canonicalDocName,
+      order: nextOrder,
+    };
+  }
+
+  return {
+    manifest: nextManifest ?? manifest,
+    changed: nextManifest != null,
+    legacyToCanonicalDocNames,
+  };
+}
+
 function readManifestSeriesRefs(manifest: CollectionManifestDoc): ManifestSeriesRef[] {
   const root = manifest.content[0];
   const nodes = root.content ?? [];
@@ -2955,6 +3748,118 @@ function collectHierarchyIds(root: HierarchyNode): Set<string> {
 
   walk(root);
   return ids;
+}
+
+function createPlaceholderManifest(collectionId: string, title: string): CollectionManifestDoc {
+  return {
+    type: 'doc',
+    content: [
+      {
+        type: 'collectionManifest',
+        attrs: {
+          collectionId,
+          title,
+          dates: '',
+        },
+        content: [
+          {
+            type: 'collectionMeta',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Synced from canonical org index. Series documents will load on demand.',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function extractSeriesIdFromDocName(docName: string): string {
+  const parts = docName.split(':').filter((part) => part.length > 0);
+  return parts[parts.length - 1] ?? 'series';
+}
+
+function createPlaceholderSeriesDoc(seriesId: string, title: string): SeriesDoc {
+  return {
+    type: 'doc',
+    content: [
+      {
+        type: 'series',
+        attrs: {
+          id: seriesId,
+          title: title || 'Untitled Series',
+          dates: '',
+        },
+        content: [
+          {
+            type: 'seriesOps',
+            content: [],
+          },
+          {
+            type: 'seriesBody',
+            content: [
+              {
+                type: 'paragraph',
+                content: [
+                  {
+                    type: 'text',
+                    text: 'Series content will sync here once loaded from the canonical room.',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function buildCanonicalSeriesSeeds(args: {
+  manifestsByCollectionId: Record<string, CollectionManifestDoc>;
+  seriesDocs: Record<string, SeriesDoc>;
+  orgId?: string;
+}): Array<{ docName: string; initialValue: SeriesDoc }> {
+  if (!args.orgId) {
+    return [];
+  }
+
+  const seeds: Array<{ docName: string; initialValue: SeriesDoc }> = [];
+  const seenDocNames = new Set<string>();
+
+  for (const [collectionId, manifest] of Object.entries(args.manifestsByCollectionId)) {
+    const normalizedManifest = normalizeManifestSeriesRefsForOrg(manifest, collectionId, args.orgId).manifest;
+    for (const ref of readManifestSeriesRefs(normalizedManifest)) {
+      if (!ref.docName || seenDocNames.has(ref.docName)) {
+        continue;
+      }
+
+      const fallbackLegacyDocName = seriesDocName(
+        collectionId,
+        ref.seriesId || extractSeriesIdFromDocName(ref.docName),
+      );
+      const initialValue =
+        args.seriesDocs[ref.docName] ??
+        args.seriesDocs[fallbackLegacyDocName] ??
+        createPlaceholderSeriesDoc(ref.seriesId || extractSeriesIdFromDocName(ref.docName), ref.title);
+
+      seeds.push({
+        docName: ref.docName,
+        initialValue: structuredClone(initialValue),
+      });
+      seenDocNames.add(ref.docName);
+    }
+  }
+
+  return seeds;
 }
 
 function createInitialWorkspace(): WorkspaceState {
