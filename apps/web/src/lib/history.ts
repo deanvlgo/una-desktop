@@ -106,10 +106,15 @@ export async function revertHistorySnapshot(args: {
 export async function fetchCollectionSeriesRefs(args: {
   token: string;
   collectionId: string;
+  sourceObjectId?: string;
 }): Promise<CollectionSeriesRefCandidate[]> {
   const base = collabHttpBaseUrl();
   const url = new URL(`${base}/history/series-refs`);
   url.searchParams.set('collectionId', args.collectionId);
+  const sourceObjectId = args.sourceObjectId?.trim();
+  if (sourceObjectId && sourceObjectId !== args.collectionId) {
+    url.searchParams.set('sourceObjectId', sourceObjectId);
+  }
 
   const response = await fetch(url.toString(), {
     headers: {

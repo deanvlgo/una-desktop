@@ -130,6 +130,17 @@ type SeriesRefCandidate = {
   updatedAt: Date;
 };
 
+function isGenericSeriesTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  if (normalized === 'untitled series') {
+    return true;
+  }
+  return /^series\s+([ivxlcdm]+|\d+)$/.test(normalized);
+}
+
 type GeminiGenerateContentResponse = {
   candidates?: Array<{
     content?: {
@@ -1382,6 +1393,7 @@ async function main(): Promise<void> {
 
       if (method === 'GET' && url.pathname === '/history/series-refs') {
         const collectionId = String(url.searchParams.get('collectionId') ?? '').trim();
+        const sourceObjectId = String(url.searchParams.get('sourceObjectId') ?? '').trim();
         if (!collectionId) {
           sendJson(response, 400, { error: 'collectionId is required.' });
           throw null;
@@ -1392,22 +1404,25 @@ async function main(): Promise<void> {
           throw null;
         }
 
-        const canonicalPattern = `series:${tokenContext.org}:${collectionId}:%`;
-        const legacyPattern = `series:${collectionId}:%`;
+        const lookupIds = Array.from(
+          new Set([collectionId, sourceObjectId].map((value) => value.trim()).filter((value) => value.length > 0)),
+        );
+        const patterns: string[] = [];
+        for (const id of lookupIds) {
+          patterns.push(`series:${tokenContext.org}:${id}:%`);
+          patterns.push(`series:${id}:%`);
+        }
 
         const rows = await postgresPool.query<{ document_name: string; data: Buffer; updated_at: Date }>(
           `
             SELECT document_name, data, updated_at
             FROM ${documentsTable}
             WHERE org_id = $1
-              AND (
-                document_name LIKE $2
-                OR document_name LIKE $3
-              )
+              AND document_name LIKE ANY($2::text[])
             ORDER BY updated_at DESC
             LIMIT 500
           `,
-          [tokenContext.org, canonicalPattern, legacyPattern],
+          [tokenContext.org, patterns],
         );
 
         const deduped = new Map<string, SeriesRefCandidate>();
@@ -1423,7 +1438,9 @@ async function main(): Promise<void> {
           if (candidate.sourceLevel && candidate.sourceLevel !== 'series') {
             continue;
           }
-          const dedupeKey = candidate.title.toLocaleLowerCase();
+          const dedupeKey = isGenericSeriesTitle(candidate.title)
+            ? `series:${candidate.seriesId.toLocaleLowerCase()}`
+            : `title:${candidate.title.toLocaleLowerCase()}`;
           if (deduped.has(dedupeKey)) {
             continue;
           }
@@ -1441,6 +1458,7 @@ async function main(): Promise<void> {
 
         sendJson(response, 200, {
           collectionId,
+          sourceObjectId: sourceObjectId || null,
           refs,
         });
         throw null;

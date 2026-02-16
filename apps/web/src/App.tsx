@@ -1171,7 +1171,8 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
     let cancelled = false;
     for (const collectionId of pendingCollectionIds) {
-      void fetchCollectionSeriesRefs({ token, collectionId })
+      const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
+      void fetchCollectionSeriesRefs({ token, collectionId, sourceObjectId })
         .then((refs) => {
           if (cancelled || refs.length === 0) {
             return;
