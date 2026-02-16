@@ -244,6 +244,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const [railPanelMode, setRailPanelMode] = useState<RailPanelMode>('collections');
   const [collectionSearch, setCollectionSearch] = useState('');
   const [showArchivedCollections, setShowArchivedCollections] = useState(false);
+  const [showCollectionsWithoutSeries, setShowCollectionsWithoutSeries] = useState(false);
   const [expandedCollectionId, setExpandedCollectionId] = useState<string | null>(null);
   const [collectionTitleMenuOpenId, setCollectionTitleMenuOpenId] = useState<string | null>(null);
   const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
@@ -261,6 +262,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyRevertingSnapshotId, setHistoryRevertingSnapshotId] = useState<number | null>(null);
+  const [showNoSeriesMessage, setShowNoSeriesMessage] = useState(false);
   const [jsonViewDebugMode, setJsonViewDebugMode] = useState(false);
   const [logVersion, setLogVersion] = useState(0);
   const [presenceByNodeId, setPresenceByNodeId] = useState<PresenceMap>({});
@@ -589,12 +591,19 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         if (!entry) {
           return false;
         }
-        return showArchivedCollections ? true : !entry.isArchived;
+        if (!showArchivedCollections && entry.isArchived) {
+          return false;
+        }
+        if (!showCollectionsWithoutSeries && entry.seriesRefs.length === 0) {
+          return false;
+        }
+        return true;
       })
       .filter((entry): entry is NonNullable<typeof entry> => entry != null);
   }, [
     canonicalEntriesById,
     collectionPresence,
+    showCollectionsWithoutSeries,
     showArchivedCollections,
     workspace.collectionOrder,
     workspace.manifestsByCollectionId,
@@ -653,6 +662,21 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       activeSeriesDocName: fallbackDocName,
     }));
   }, [seriesRefs, workspace.activeSeriesDocName]);
+
+  useEffect(() => {
+    setShowNoSeriesMessage(false);
+    if (!activeManifestDoc || seriesRefs.length > 0 || typeof window === 'undefined') {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setShowNoSeriesMessage(true);
+    }, 1200);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [activeManifestDoc, seriesRefs.length, workspace.activeCollectionId]);
 
   useEffect(() => {
     if (manualCollectionSelectionRef.current) {
@@ -2375,11 +2399,14 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     const bootstrappingCollections = collabEnabled && workspace.collectionOrder.length === 0;
     const bootstrappingSeries = Boolean(activeManifestDoc) && seriesRefs.length > 0 && !activeSeriesDoc;
     const noSeriesAvailable = Boolean(activeManifestDoc) && seriesRefs.length === 0;
+    const showNoSeriesLoader = noSeriesAvailable && !showNoSeriesMessage;
     return (
       <div className="app-shell">
         {bootstrappingCollections || bootstrappingSeries
           ? 'Loading collection documents…'
-          : noSeriesAvailable
+          : showNoSeriesLoader
+            ? 'Loading collection documents…'
+            : noSeriesAvailable
             ? 'No series documents are available for this collection yet.'
             : 'No active series document loaded.'}
       </div>
@@ -2494,6 +2521,14 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                     onChange={(event) => setShowArchivedCollections(event.target.checked)}
                   />
                   <span>Show archived</span>
+                </label>
+                <label className="collection-filter-toggle">
+                  <input
+                    type="checkbox"
+                    checked={showCollectionsWithoutSeries}
+                    onChange={(event) => setShowCollectionsWithoutSeries(event.target.checked)}
+                  />
+                  <span>Show collections without series</span>
                 </label>
                 <ul className="manifest-panel__series-list">
                   {filteredCollectionEntries.map((collection, index) => {
