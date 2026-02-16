@@ -771,7 +771,10 @@ function openPrintPreview(html: string, title: string) {
 
   const popup = window.open('', '_blank', 'noopener,noreferrer');
   if (!popup) {
-    throw new Error('Popup blocked. Allow popups to export PDF.');
+    const fallbackName = `${sanitizeFilename(title)}-print.html`;
+    downloadTextFile(fallbackName, html, 'text/html;charset=utf-8');
+    window.alert('Popup was blocked. Downloaded a printable HTML file instead.');
+    return;
   }
 
   popup.document.open();

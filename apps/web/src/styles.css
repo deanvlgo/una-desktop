@@ -679,8 +679,8 @@ body {
 }
 
 .workspace-context--collapsed {
-  width: 56px;
-  min-width: 56px;
+  width: min(220px, 18vw);
+  min-width: 180px;
 }
 
 .workspace-main__mode-row {
@@ -2302,11 +2302,9 @@ body {
 }
 
 .revisions-panel--collapsed {
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  min-height: auto;
-  padding: 0.35rem 0.25rem;
+  min-height: 220px;
+  display: grid;
+  align-content: start;
 }
 
 .revisions-panel__header {
@@ -2368,6 +2366,10 @@ body {
 .revisions-panel__error {
   margin: 0.7rem 0 0;
   font-size: 0.78rem;
+}
+
+.revisions-panel__status--collapsed {
+  margin-top: 0.55rem;
 }
 
 .revisions-panel__error {

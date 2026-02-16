@@ -243,7 +243,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     return new URLSearchParams(window.location.search).get('debug') === '1';
   });
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const [historyPanelCollapsed, setHistoryPanelCollapsed] = useState(false);
+  const [historyPanelCollapsed, setHistoryPanelCollapsed] = useState(true);
   const [historySnapshots, setHistorySnapshots] = useState<HistorySnapshot[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -2859,40 +2859,32 @@ export function App({ currentUser, token, onLogout }: AppProps) {
             className={historyPanelCollapsed ? 'panel revisions-panel revisions-panel--collapsed' : 'panel revisions-panel'}
             aria-label="Series revision history"
           >
-            {historyPanelCollapsed ? (
+            <div className="revisions-panel__header">
+              <div className="revisions-panel__heading">
+                <h3>Revisions</h3>
+                <p>{activeSeriesRef?.title ?? historyDocName}</p>
+              </div>
               <button
                 type="button"
-                className="revisions-panel__collapsed-tab"
-                onClick={() => setHistoryPanelCollapsed(false)}
-                aria-label="Expand revisions panel"
-                title="Expand revisions"
+                className="revisions-panel__toggle"
+                onClick={() => setHistoryPanelCollapsed((current) => !current)}
+                aria-label={historyPanelCollapsed ? 'Expand revisions panel' : 'Collapse revisions panel'}
+                title={historyPanelCollapsed ? 'Expand' : 'Collapse'}
               >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path
-                    d="M12 5.5a6.5 6.5 0 1 0 6.38 7.75 1 1 0 1 1 1.96.38A8.5 8.5 0 1 1 12 3.5h.25l-1.04-1.04a1 1 0 0 1 1.42-1.42l2.75 2.75a1 1 0 0 1 0 1.42l-2.75 2.75a1 1 0 1 1-1.42-1.42L12.25 5.5H12Z"
-                    fill="currentColor"
-                  />
-                  <path d="M12 7.75a1 1 0 0 1 1 1v2.62l1.88 1.13a1 1 0 0 1-1.03 1.72l-2.37-1.42a1 1 0 0 1-.48-.86V8.75a1 1 0 0 1 1-1Z" fill="currentColor" />
-                </svg>
+                {historyPanelCollapsed ? '◀' : '▶'}
               </button>
+            </div>
+
+            {historyPanelCollapsed ? (
+              <p className="revisions-panel__status revisions-panel__status--collapsed">
+                {historyLoading
+                  ? 'Loading revisions…'
+                  : historySnapshots.length > 0
+                    ? `${historySnapshots.length} revisions loaded.`
+                    : 'No revisions yet for this finding aid.'}
+              </p>
             ) : (
               <>
-                <div className="revisions-panel__header">
-                  <div className="revisions-panel__heading">
-                    <h3>Revisions</h3>
-                    <p>{activeSeriesRef?.title ?? historyDocName}</p>
-                  </div>
-                  <button
-                    type="button"
-                    className="revisions-panel__toggle"
-                    onClick={() => setHistoryPanelCollapsed(true)}
-                    aria-label="Collapse revisions panel"
-                    title="Collapse"
-                  >
-                    ▶
-                  </button>
-                </div>
-
                 {historyLoading ? <p className="revisions-panel__status">Loading revisions…</p> : null}
                 {historyError ? <p className="revisions-panel__error">{historyError}</p> : null}
                 {!historyLoading && historySnapshots.length === 0 ? (
