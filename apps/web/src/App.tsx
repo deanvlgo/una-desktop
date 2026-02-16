@@ -65,6 +65,11 @@ import {
 } from './lib/canonicalIndex';
 import type { OrgCollectionIndexEntry } from './lib/canonicalRooms';
 import {
+  fetchSharedCollectionEntries,
+  patchSharedCollectionEntry,
+  sharedCollectionsApiEnabled,
+} from './lib/sharedCollectionsApi';
+import {
   exportCollectionFindingAid,
   exportSeriesFindingAid,
   type ExportFormat,
@@ -286,6 +291,12 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     }
     return defaultCollabEnabled();
   }, []);
+  const sharedCollectionsEnabled = useMemo(() => {
+    if (typeof window === 'undefined') {
+      return false;
+    }
+    return sharedCollectionsApiEnabled();
+  }, []);
   const orgId = currentUser.organization_id ?? undefined;
 
   useEffect(() => {
@@ -294,12 +305,42 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
   useEffect(() => {
     manifestSeriesRecoveryAttemptedRef.current.clear();
-  }, [collabEnabled, orgId, token]);
+  }, [collabEnabled, orgId, sharedCollectionsEnabled, token]);
 
   useEffect(() => {
     if (!orgId || !token) {
       setCanonicalEntriesById({});
+      canonicalMapRef.current = null;
       return;
+    }
+
+    if (sharedCollectionsEnabled) {
+      canonicalMapRef.current = null;
+      let isDisposed = false;
+
+      const refreshEntries = async () => {
+        try {
+          const next = await fetchSharedCollectionEntries();
+          if (isDisposed) {
+            return;
+          }
+          setCanonicalEntriesById(next);
+        } catch (error) {
+          if (!isDisposed) {
+            console.error('Failed loading shared collection entries', error);
+          }
+        }
+      };
+
+      void refreshEntries();
+      const intervalId = window.setInterval(() => {
+        void refreshEntries();
+      }, 20000);
+
+      return () => {
+        isDisposed = true;
+        window.clearInterval(intervalId);
+      };
     }
 
     const connection = connectOrgIndex(orgId, token);
@@ -329,7 +370,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       canonicalMapRef.current = null;
       disconnectOrgIndex(connection);
     };
-  }, [orgId, token]);
+  }, [orgId, sharedCollectionsEnabled, token]);
 
   const activeManifestDoc = useMemo(
     () => workspace.manifestsByCollectionId[workspace.activeCollectionId] ?? null,
@@ -1442,14 +1483,8 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         isArchived?: boolean;
       },
     ) => {
-      const map = canonicalMapRef.current;
-      if (!map) {
-        return;
-      }
-
-      const existing = getOrgIndexEntry(map, collectionId);
       const nowIso = new Date().toISOString();
-      upsertOrgIndexEntry(map, {
+      const mergePatch = (existing?: OrgCollectionIndexEntry): OrgCollectionIndexEntry => ({
         collectionId,
         title: patch.title ?? existing?.title ?? collectionId,
         createdBy: existing?.createdBy ?? currentUser.id,
@@ -1462,8 +1497,38 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         sourceObjectId: existing?.sourceObjectId,
         entryType: existing?.entryType,
       });
+
+      if (sharedCollectionsEnabled) {
+        setCanonicalEntriesById((previous) => ({
+          ...previous,
+          [collectionId]: mergePatch(previous[collectionId]),
+        }));
+
+        void patchSharedCollectionEntry({ collectionId, patch })
+          .then((updated) => {
+            if (!updated) {
+              return;
+            }
+            setCanonicalEntriesById((previous) => ({
+              ...previous,
+              [collectionId]: updated,
+            }));
+          })
+          .catch((error) => {
+            console.error(`Failed syncing collection metadata for ${collectionId}`, error);
+          });
+        return;
+      }
+
+      const map = canonicalMapRef.current;
+      if (!map) {
+        return;
+      }
+
+      const existing = getOrgIndexEntry(map, collectionId);
+      upsertOrgIndexEntry(map, mergePatch(existing ?? undefined));
     },
-    [currentUser.id],
+    [currentUser.id, sharedCollectionsEnabled],
   );
 
   const renameCollectionTitle = useCallback(
