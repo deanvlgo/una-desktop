@@ -1,4 +1,4 @@
-import { apiFetch } from './api';
+import { apiFetch, apiFetchWithBase } from './api';
 import type { OrgCollectionIndexEntry } from './canonicalRooms';
 
 type SharedCollectionsResponse = {
@@ -52,6 +52,29 @@ export function sharedCollectionsApiEnabled(): boolean {
     }
   }
   return readEnabledFlag(import.meta.env.VITE_USE_SHARED_COLLECTIONS_API);
+}
+
+function readSharedCollectionsApiBaseUrl(): string | null {
+  if (typeof window !== 'undefined') {
+    const query = new URLSearchParams(window.location.search).get('sharedCollectionsApiBase');
+    if (query && query.trim().length > 0) {
+      return query.trim();
+    }
+  }
+
+  const raw = import.meta.env.VITE_SHARED_COLLECTIONS_API_BASE_URL;
+  if (!raw || raw.trim().length === 0) {
+    return null;
+  }
+  return raw.trim();
+}
+
+async function sharedCollectionsFetch(path: string, init: RequestInit = {}) {
+  const sharedBase = readSharedCollectionsApiBaseUrl();
+  if (sharedBase) {
+    return apiFetchWithBase(sharedBase, path, init);
+  }
+  return apiFetch(path, init);
 }
 
 function normalizeIso(value: unknown, fallbackIso: string): string {
@@ -108,7 +131,7 @@ function normalizeEntry(entry: SharedCollectionEntry): OrgCollectionIndexEntry |
 }
 
 export async function fetchSharedCollectionEntries(): Promise<Record<string, OrgCollectionIndexEntry>> {
-  const response = await apiFetch('/api/una/v1/collections');
+  const response = await sharedCollectionsFetch('/api/una/v1/collections');
   if (!response.ok) {
     throw new Error(`Shared collections API failed (${response.status})`);
   }
@@ -135,7 +158,7 @@ export async function patchSharedCollectionEntry(args: {
     isArchived?: boolean;
   };
 }): Promise<OrgCollectionIndexEntry | null> {
-  const response = await apiFetch(`/api/una/v1/collections/${encodeURIComponent(args.collectionId)}`, {
+  const response = await sharedCollectionsFetch(`/api/una/v1/collections/${encodeURIComponent(args.collectionId)}`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
