@@ -588,6 +588,7 @@ export function FindingAidEditor({
   const syncedContentSignatureRef = useRef(contentSignature);
   const syncedHierarchySignatureRef = useRef(hierarchySignature);
   const syncedHierarchyHeadingsRef = useRef(hierarchyHeadings);
+  const hasHydratedCollabFromCanonicalRef = useRef(false);
   const [sectionDepth, setSectionDepth] = useState(0);
 
   useEffect(() => {
@@ -751,6 +752,27 @@ export function FindingAidEditor({
     const shapeChanged = !isSameHierarchyShape(syncedHierarchyHeadingsRef.current, hierarchyHeadings);
 
     if (!contentChanged && !hierarchyChanged) {
+      if (collaborationEnabled) {
+        const editorContent = normalizeHierarchySectionContent(
+          readContentFromEditor(editor.getJSON()),
+          hierarchyHeadings,
+        );
+        const editorContentSignature = JSON.stringify(editorContent);
+        const shouldReconcileFromCanonical =
+          !editor.isFocused &&
+          (!hasHydratedCollabFromCanonicalRef.current || editorContentSignature !== contentSignature);
+
+        if (shouldReconcileFromCanonical) {
+          isApplyingRef.current = true;
+          editor.commands.setContent(contentToDoc(content, hierarchyHeadings), false);
+          isApplyingRef.current = false;
+
+          syncedContentSignatureRef.current = contentSignature;
+          syncedHierarchySignatureRef.current = hierarchySignature;
+          syncedHierarchyHeadingsRef.current = hierarchyHeadings;
+          hasHydratedCollabFromCanonicalRef.current = true;
+        }
+      }
       return;
     }
 
@@ -765,13 +787,18 @@ export function FindingAidEditor({
       return;
     }
 
-    // In collaborative mode, TipTap+Yjs already applies body text changes live.
-    // Re-applying setContent on each mirrored canonical update can duplicate content.
+    // In collaborative mode, desktop-to-desktop edits arrive via TipTap/Yjs (`tiptap` field),
+    // while mobile edits arrive through canonical `state.json`. If the editor already matches
+    // incoming content, skip. Otherwise apply content so mobile-originated edits render.
     if (collaborationEnabled && !hierarchyChanged) {
-      syncedContentSignatureRef.current = contentSignature;
-      syncedHierarchySignatureRef.current = hierarchySignature;
-      syncedHierarchyHeadingsRef.current = hierarchyHeadings;
-      return;
+      const editorContent = readContentFromEditor(editor.getJSON());
+      const editorContentSignature = JSON.stringify(editorContent);
+      if (editorContentSignature === contentSignature) {
+        syncedContentSignatureRef.current = contentSignature;
+        syncedHierarchySignatureRef.current = hierarchySignature;
+        syncedHierarchyHeadingsRef.current = hierarchyHeadings;
+        return;
+      }
     }
 
     isApplyingRef.current = true;
@@ -781,6 +808,9 @@ export function FindingAidEditor({
     syncedContentSignatureRef.current = contentSignature;
     syncedHierarchySignatureRef.current = hierarchySignature;
     syncedHierarchyHeadingsRef.current = hierarchyHeadings;
+    if (collaborationEnabled) {
+      hasHydratedCollabFromCanonicalRef.current = true;
+    }
   }, [collaborationEnabled, content, contentSignature, editor, hierarchyHeadings, hierarchySignature]);
 
   useEffect(() => {

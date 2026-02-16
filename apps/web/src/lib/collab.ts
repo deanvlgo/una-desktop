@@ -28,6 +28,7 @@ type PresenceState = {
 type CollabClientOptions = {
   url: string;
   user: CollabUser;
+  instanceId: string;
   authToken?: string | null;
   onDocChanged?: (docName: string) => void;
   onPresenceChanged?: () => void;
@@ -94,6 +95,7 @@ export class CollabClient {
     });
 
     provider.setAwarenessField('user', this.options.user);
+    provider.setAwarenessField('instanceId', this.options.instanceId);
     provider.setAwarenessField('focusId', null);
     provider.setAwarenessField('updatedAt', Date.now());
 
@@ -146,6 +148,7 @@ export class CollabClient {
     }
 
     room.provider.setAwarenessField('user', this.options.user);
+    room.provider.setAwarenessField('instanceId', this.options.instanceId);
     room.provider.setAwarenessField('focusId', focusId);
     room.provider.setAwarenessField('updatedAt', Date.now());
   }
@@ -163,6 +166,7 @@ export class CollabClient {
     }
 
     room.provider.setAwarenessField('user', this.options.user);
+    room.provider.setAwarenessField('instanceId', this.options.instanceId);
     room.provider.setAwarenessField('catalogCursor', cursor);
     room.provider.setAwarenessField('updatedAt', Date.now());
   }

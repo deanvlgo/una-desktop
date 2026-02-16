@@ -50,7 +50,12 @@ import { formatHierarchyNodeHeading, getHierarchyLevelLabel, toRomanNumeral } fr
 import { userInitials } from './lib/user';
 import { CollabClient, buildCollabSeeds } from './lib/collab';
 import type { AuthenticatedUser } from './types/auth';
-import { fetchHistorySnapshots, revertHistorySnapshot, type HistorySnapshot } from './lib/history';
+import {
+  fetchCollectionSeriesRefs,
+  fetchHistorySnapshots,
+  revertHistorySnapshot,
+  type HistorySnapshot,
+} from './lib/history';
 import {
   connectOrgIndex,
   disconnectOrgIndex,
@@ -191,6 +196,8 @@ const COLLAB_WS_URL =
   (import.meta.env.VITE_HOCUSPOCUS_URL as string | undefined) ??
   defaultCollabWsUrl();
 const USER_COLOR_PALETTE = ['#ff5757', '#3b82f6', '#059669', '#a855f7', '#d97706', '#0f766e'];
+const PLACEHOLDER_COLLECTION_META_TEXT = 'Synced from canonical org index. Series documents will load on demand.';
+const PLACEHOLDER_SERIES_BODY_TEXT = 'Series content will sync here once loaded from the canonical room.';
 
 function pickUserColor(seed: string): string {
   if (seed.length === 0) {
@@ -254,6 +261,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const [collectionPresence, setCollectionPresence] = useState<Record<string, number>>({});
   const [catalogCursorByField, setCatalogCursorByField] = useState<CatalogCursorByField>({});
   const [canonicalEntriesById, setCanonicalEntriesById] = useState<Record<string, OrgCollectionIndexEntry>>({});
+  const canonicalEntriesRef = useRef<Record<string, OrgCollectionIndexEntry>>({});
   const canonicalMapRef = useRef<import('yjs').Map<string> | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -261,6 +269,8 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const collabClientRef = useRef<CollabClient | null>(null);
   const collabInstanceIdRef = useRef<string>(`desktop-${crypto.randomUUID()}`);
   const lastFocusedSeriesDocRef = useRef<string | null>(null);
+  const presenceSyncRafRef = useRef<number | null>(null);
+  const manifestSeriesRecoveryAttemptedRef = useRef<Set<string>>(new Set());
   const localUser = useMemo(
     () => ({
       id: currentUser.id,
@@ -277,6 +287,14 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     return defaultCollabEnabled();
   }, []);
   const orgId = currentUser.organization_id ?? undefined;
+
+  useEffect(() => {
+    canonicalEntriesRef.current = canonicalEntriesById;
+  }, [canonicalEntriesById]);
+
+  useEffect(() => {
+    manifestSeriesRecoveryAttemptedRef.current.clear();
+  }, [collabEnabled, orgId, token]);
 
   useEffect(() => {
     if (!orgId || !token) {
@@ -552,7 +570,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   }, [collectionEntries, collectionSearch]);
 
   const activeSeriesRef = useMemo(
-    () => seriesRefs.find((series) => series.docName === workspace.activeSeriesDocName) ?? null,
+    () => seriesRefs.find((series) => series.docName === workspace.activeSeriesDocName) ?? seriesRefs[0] ?? null,
     [seriesRefs, workspace.activeSeriesDocName],
   );
 
@@ -590,9 +608,23 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     }));
   }, [seriesRefs, workspace.activeSeriesDocName]);
 
-  const activeSeriesDoc = workspace.seriesDocs[workspace.activeSeriesDocName] ?? null;
+  const activeSeriesDoc = useMemo(() => {
+    if (!activeSeriesRef) {
+      return null;
+    }
+    const loaded = workspace.seriesDocs[activeSeriesRef.docName];
+    if (loaded) {
+      return loaded;
+    }
+    return createPlaceholderSeriesDoc(
+      activeSeriesRef.seriesId || extractSeriesIdFromDocName(activeSeriesRef.docName),
+      activeSeriesRef.title,
+    );
+  }, [activeSeriesRef, workspace.seriesDocs]);
   const activeSeriesProvider = collabEnabled
-    ? collabClientRef.current?.getProvider(workspace.activeSeriesDocName) ?? null
+    ? activeSeriesRef
+      ? collabClientRef.current?.getProvider(activeSeriesRef.docName) ?? null
+      : null
     : null;
 
   const activeHierarchy = useMemo<HierarchyNode | null>(() => {
@@ -672,6 +704,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   }, [currentFocusState, jsonViewDebugMode, updateCurrentFocusState]);
 
   const applyWorkspaceFromCollab = useCallback((changedDocName?: string) => {
+    void changedDocName;
     const collab = collabClientRef.current;
     if (!collab) {
       return;
@@ -684,17 +717,20 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       let changed = false;
       const legacyToCanonicalDocNames: Record<string, string> = {};
 
-      const targetCollectionIds =
-        changedDocName && changedDocName.startsWith('collection:')
-          ? previous.collectionOrder.filter((collectionId) => {
-              const manifestRoomName = orgId ? `collection:${orgId}:${collectionId}` : manifestDocName(collectionId);
-              return manifestRoomName === changedDocName;
-            })
-          : previous.collectionOrder;
+      const targetCollectionIds = Array.from(
+        new Set([...previous.collectionOrder, ...Object.keys(canonicalEntriesRef.current)]),
+      );
 
       for (const collectionId of targetCollectionIds) {
-        const docName = orgId ? `collection:${orgId}:${collectionId}` : manifestDocName(collectionId);
-        const remoteManifest = collab.getDoc<CollectionManifestDoc>(docName);
+        const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
+        const candidateRooms = manifestRoomCandidates({ collectionId, orgId, sourceObjectId });
+        const candidateManifests = candidateRooms
+          .map((docName) => collab.getDoc<CollectionManifestDoc>(docName))
+          .filter((entry): entry is CollectionManifestDoc => entry != null);
+
+        const remoteManifest =
+          candidateManifests.find((entry) => !isPlaceholderManifestDoc(entry)) ?? candidateManifests[0] ?? null;
+
         if (!remoteManifest) {
           continue;
         }
@@ -703,7 +739,11 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         Object.assign(legacyToCanonicalDocNames, normalizedRemote.legacyToCanonicalDocNames);
 
         const currentManifest = previous.manifestsByCollectionId[collectionId];
-        if (!currentManifest || JSON.stringify(currentManifest) !== JSON.stringify(normalizedRemote.manifest)) {
+        const shouldSkipPlaceholderOverride =
+          currentManifest != null &&
+          readManifestSeriesRefs(currentManifest).length > 0 &&
+          isPlaceholderManifestDoc(normalizedRemote.manifest);
+        if (!shouldSkipPlaceholderOverride && (!currentManifest || JSON.stringify(currentManifest) !== JSON.stringify(normalizedRemote.manifest))) {
           if (nextManifests === previous.manifestsByCollectionId) {
             nextManifests = { ...previous.manifestsByCollectionId };
           }
@@ -759,15 +799,27 @@ export function App({ currentUser, token, onLogout }: AppProps) {
             legacyAliases.add(legacyDefault);
           }
 
-          let remoteSeriesDoc = collab.getDoc<SeriesDoc>(ref.docName);
+          const primaryRemoteSeriesDoc = collab.getDoc<SeriesDoc>(ref.docName);
+          let remoteSeriesDoc: SeriesDoc | null =
+            primaryRemoteSeriesDoc && !isPlaceholderSeriesDoc(primaryRemoteSeriesDoc) ? primaryRemoteSeriesDoc : null;
+          let placeholderFallbackSeriesDoc: SeriesDoc | null = primaryRemoteSeriesDoc ?? null;
           if (!remoteSeriesDoc) {
             for (const legacyDocName of legacyAliases) {
               const legacyDoc = collab.getDoc<SeriesDoc>(legacyDocName);
-              if (legacyDoc) {
+              if (!legacyDoc) {
+                continue;
+              }
+              if (!isPlaceholderSeriesDoc(legacyDoc)) {
                 remoteSeriesDoc = legacyDoc;
                 break;
               }
+              if (!placeholderFallbackSeriesDoc) {
+                placeholderFallbackSeriesDoc = legacyDoc;
+              }
             }
+          }
+          if (!remoteSeriesDoc) {
+            remoteSeriesDoc = placeholderFallbackSeriesDoc;
           }
 
           let currentSeriesDoc = nextSeriesDocs[ref.docName];
@@ -833,11 +885,10 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
       if (!nextSeriesDocs[nextActiveSeriesDocName]) {
         const activeManifest = manifestsForSeriesRefs[previous.activeCollectionId];
-        const fallbackDocName =
-          (activeManifest ? readManifestSeriesRefs(activeManifest).find((ref) => nextSeriesDocs[ref.docName])?.docName : null) ??
-          Object.keys(nextSeriesDocs)[0] ??
-          previous.activeSeriesDocName;
-        if (fallbackDocName !== nextActiveSeriesDocName) {
+        const fallbackDocName = activeManifest
+          ? readManifestSeriesRefs(activeManifest).find((ref) => nextSeriesDocs[ref.docName])?.docName ?? null
+          : null;
+        if (fallbackDocName && fallbackDocName !== nextActiveSeriesDocName) {
           nextActiveSeriesDocName = fallbackDocName;
           changed = true;
         }
@@ -901,9 +952,34 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       nextCatalogCursorByField[state.catalogCursor.fieldId] = chips;
     }
 
-    setPresenceByNodeId(nextPresenceByNodeId);
-    setCollectionPresence(nextCollectionPresence);
-    setCatalogCursorByField(nextCatalogCursorByField);
+    if (typeof window === 'undefined') {
+      setPresenceByNodeId(nextPresenceByNodeId);
+      setCollectionPresence(nextCollectionPresence);
+      setCatalogCursorByField(nextCatalogCursorByField);
+      return;
+    }
+
+    if (presenceSyncRafRef.current != null) {
+      window.cancelAnimationFrame(presenceSyncRafRef.current);
+    }
+    presenceSyncRafRef.current = window.requestAnimationFrame(() => {
+      presenceSyncRafRef.current = null;
+      setPresenceByNodeId(nextPresenceByNodeId);
+      setCollectionPresence(nextCollectionPresence);
+      setCatalogCursorByField(nextCatalogCursorByField);
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (typeof window === 'undefined') {
+        return;
+      }
+      if (presenceSyncRafRef.current != null) {
+        window.cancelAnimationFrame(presenceSyncRafRef.current);
+        presenceSyncRafRef.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -948,6 +1024,19 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       }
       allSeeds.push(seed);
       connectedDocNames.add(seed.docName);
+    }
+    for (const [collectionId, manifest] of Object.entries(snapshot.manifestsByCollectionId)) {
+      const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
+      for (const docName of manifestRoomCandidates({ collectionId, orgId, sourceObjectId })) {
+        if (connectedDocNames.has(docName)) {
+          continue;
+        }
+        allSeeds.push({
+          docName,
+          initialValue: structuredClone(manifest),
+        });
+        connectedDocNames.add(docName);
+      }
     }
 
     for (const seed of allSeeds) {
@@ -995,11 +1084,106 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       allSeeds.push(seed);
       connectedDocNames.add(seed.docName);
     }
+    for (const [collectionId, manifest] of Object.entries(workspace.manifestsByCollectionId)) {
+      const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
+      for (const docName of manifestRoomCandidates({ collectionId, orgId, sourceObjectId })) {
+        if (connectedDocNames.has(docName)) {
+          continue;
+        }
+        allSeeds.push({
+          docName,
+          initialValue: structuredClone(manifest),
+        });
+        connectedDocNames.add(docName);
+      }
+    }
 
     for (const seed of allSeeds) {
       collab.connectRoom(seed);
     }
   }, [collabEnabled, manifestDocNameByCollectionId, orgId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
+
+  useEffect(() => {
+    if (!collabEnabled || !token) {
+      return;
+    }
+
+    const pendingCollectionIds: string[] = [];
+    for (const collectionId of workspace.collectionOrder) {
+      const manifest = workspace.manifestsByCollectionId[collectionId];
+      if (!manifest) {
+        continue;
+      }
+      if (readManifestSeriesRefs(manifest).length > 0) {
+        continue;
+      }
+      if (manifestSeriesRecoveryAttemptedRef.current.has(collectionId)) {
+        continue;
+      }
+      manifestSeriesRecoveryAttemptedRef.current.add(collectionId);
+      pendingCollectionIds.push(collectionId);
+    }
+
+    if (pendingCollectionIds.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    for (const collectionId of pendingCollectionIds) {
+      void fetchCollectionSeriesRefs({ token, collectionId })
+        .then((refs) => {
+          if (cancelled || refs.length === 0) {
+            return;
+          }
+          const recoveredRefs = refs
+            .map((ref) => ({
+              seriesId: String(ref.seriesId ?? '').trim(),
+              title: String(ref.title ?? 'Untitled Series'),
+              order: Number.isFinite(ref.order) && ref.order > 0 ? Math.floor(ref.order) : 0,
+              docName: String(ref.docName ?? '').trim(),
+            }))
+            .filter((ref) => ref.docName.length > 0);
+          if (recoveredRefs.length === 0) {
+            return;
+          }
+
+          setWorkspace((previous) => {
+            const manifest = previous.manifestsByCollectionId[collectionId];
+            if (!manifest) {
+              return previous;
+            }
+            if (readManifestSeriesRefs(manifest).length > 0) {
+              return previous;
+            }
+
+            const nextManifest = withManifestSeriesRefs(manifest, recoveredRefs);
+            const nextManifests = {
+              ...previous.manifestsByCollectionId,
+              [collectionId]: nextManifest,
+            };
+
+            const nextActiveSeriesDocName =
+              previous.activeCollectionId === collectionId && !previous.activeSeriesDocName
+                ? recoveredRefs[0]?.docName ?? previous.activeSeriesDocName
+                : previous.activeSeriesDocName;
+
+            return {
+              ...previous,
+              manifestsByCollectionId: nextManifests,
+              activeSeriesDocName: nextActiveSeriesDocName,
+            };
+          });
+        })
+        .catch((error) => {
+          manifestSeriesRecoveryAttemptedRef.current.delete(collectionId);
+          console.error(`Failed recovering series refs for collection ${collectionId}`, error);
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [collabEnabled, token, workspace.collectionOrder, workspace.manifestsByCollectionId]);
 
   useEffect(() => {
     if (!collabEnabled) {
@@ -1020,7 +1204,9 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       }
 
       const normalizedManifest = normalizeManifestSeriesRefsForOrg(manifest, collectionId, orgId).manifest;
-      collab.publishDoc(roomName, normalizedManifest);
+      if (!isPlaceholderManifestDoc(normalizedManifest)) {
+        collab.publishDoc(roomName, normalizedManifest);
+      }
 
       for (const ref of readManifestSeriesRefs(normalizedManifest)) {
         if (!ref.docName) {
@@ -1041,6 +1227,9 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     }
 
     for (const [docName, seriesDoc] of seriesDocsToPublish.entries()) {
+      if (isPlaceholderSeriesDoc(seriesDoc)) {
+        continue;
+      }
       collab.publishDoc(docName, seriesDoc);
     }
   }, [collabEnabled, manifestDocNameByCollectionId, orgId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
@@ -1148,8 +1337,8 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     if (!activeHierarchy) {
       return [];
     }
-    return flattenHierarchyHeadingsForDocument(activeHierarchy);
-  }, [activeHierarchy]);
+    return flattenHierarchyHeadingsForDocument(activeHierarchy, activeSeriesRef?.order ?? 1);
+  }, [activeHierarchy, activeSeriesRef?.order]);
 
   const hierarchyOrdinalById = useMemo(() => {
     const map: Record<string, string> = {};
@@ -1319,7 +1508,11 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     setWorkspace((previous) => {
       const manifest = previous.manifestsByCollectionId[collectionId];
       if (!manifest) {
-        return previous;
+        return {
+          ...previous,
+          activeCollectionId: collectionId,
+          activeSeriesDocName: '',
+        };
       }
 
       const refs = readManifestSeriesRefs(manifest);
@@ -1327,7 +1520,11 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         refs.find((ref) => ref.docName === previous.activeSeriesDocName)?.docName ?? refs[0]?.docName ?? null;
 
       if (!nextActiveDocName) {
-        return previous;
+        return {
+          ...previous,
+          activeCollectionId: collectionId,
+          activeSeriesDocName: '',
+        };
       }
 
       return {
@@ -2009,25 +2206,6 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     [workspace.manifestsByCollectionId, workspace.seriesDocs],
   );
 
-  if (!activeManifestDoc || !activeSeriesDoc || !activeHierarchy || !currentFocusState) {
-    return <div className="app-shell">No active series document loaded.</div>;
-  }
-
-  const manifestRoot = activeManifestDoc.content[0];
-  const activeSeriesPresenceCount = collectionPresence[workspace.activeSeriesDocName] ?? 0;
-  const linkedImages = focusedNode?.level === 'item' ? extractLinkedImages(focusedNode.fields) : [];
-  const groupedItemFields = focusedNode?.level === 'item' ? groupItemFieldsForCms(focusedNode.fields) : [];
-  const cmsLevelColor = focusedNode ? CMS_LEVEL_COLORS[focusedNode.level] : '#6b7280';
-  const metadataByKey = focusedNode?.metadata ?? {};
-  const activeCollectionTitle = String(manifestRoot.attrs?.title ?? 'Untitled Collection');
-  const activeCollectionDescriptionText =
-    activeCollectionDescription.length > 0 ? activeCollectionDescription : 'No collection description provided yet.';
-  const visibleMode = !jsonViewDebugMode && currentFocusState.mode === 'json' ? 'document' : currentFocusState.mode;
-  const focusedNodeOrdinal = focusedNode ? hierarchyOrdinalById[focusedNode.id] ?? 'I' : 'I';
-  const focusedCatalogHeading = focusedNode
-    ? formatHierarchyNodeHeading(focusedNode.level, focusedNodeOrdinal, focusedNode.title)
-    : '';
-
   const handleHistoryRevert = useCallback(
     async (snapshotId: number) => {
       if (!historyDocName || historyRevertingSnapshotId != null) {
@@ -2060,6 +2238,36 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     },
     [historyDocName, historyRevertingSnapshotId, token],
   );
+
+  if (!activeManifestDoc || !activeSeriesDoc || !activeHierarchy || !currentFocusState) {
+    const bootstrappingCollections = collabEnabled && workspace.collectionOrder.length === 0;
+    const bootstrappingSeries = Boolean(activeManifestDoc) && seriesRefs.length > 0 && !activeSeriesDoc;
+    const noSeriesAvailable = Boolean(activeManifestDoc) && seriesRefs.length === 0;
+    return (
+      <div className="app-shell">
+        {bootstrappingCollections || bootstrappingSeries
+          ? 'Loading collection documents…'
+          : noSeriesAvailable
+            ? 'No series documents are available for this collection yet.'
+            : 'No active series document loaded.'}
+      </div>
+    );
+  }
+
+  const manifestRoot = activeManifestDoc.content[0];
+  const activeSeriesPresenceCount = collectionPresence[workspace.activeSeriesDocName] ?? 0;
+  const linkedImages = focusedNode?.level === 'item' ? extractLinkedImages(focusedNode.fields) : [];
+  const groupedItemFields = focusedNode?.level === 'item' ? groupItemFieldsForCms(focusedNode.fields) : [];
+  const cmsLevelColor = focusedNode ? CMS_LEVEL_COLORS[focusedNode.level] : '#6b7280';
+  const metadataByKey = focusedNode?.metadata ?? {};
+  const activeCollectionTitle = String(manifestRoot.attrs?.title ?? 'Untitled Collection');
+  const activeCollectionDescriptionText =
+    activeCollectionDescription.length > 0 ? activeCollectionDescription : 'No collection description provided yet.';
+  const visibleMode = !jsonViewDebugMode && currentFocusState.mode === 'json' ? 'document' : currentFocusState.mode;
+  const focusedNodeOrdinal = focusedNode ? hierarchyOrdinalById[focusedNode.id] ?? 'I' : 'I';
+  const focusedCatalogHeading = focusedNode
+    ? formatHierarchyNodeHeading(focusedNode.level, focusedNodeOrdinal, focusedNode.title)
+    : '';
 
   return (
     <div className="app-shell">
@@ -3671,6 +3879,38 @@ function canonicalSeriesDocNameForRef(args: {
   return seriesDocName(args.collectionId, args.seriesId, args.orgId);
 }
 
+function manifestRoomCandidates(args: {
+  collectionId: string;
+  orgId?: string;
+  sourceObjectId?: string;
+}): string[] {
+  const ids: string[] = [];
+  const pushId = (value?: string) => {
+    if (!value) {
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || ids.includes(trimmed)) {
+      return;
+    }
+    ids.push(trimmed);
+  };
+
+  pushId(args.collectionId);
+  pushId(args.sourceObjectId);
+
+  const rooms: string[] = [];
+  if (args.orgId) {
+    for (const id of ids) {
+      rooms.push(manifestDocName(id, args.orgId));
+    }
+  }
+  for (const id of ids) {
+    rooms.push(manifestDocName(id));
+  }
+  return rooms;
+}
+
 function normalizeManifestSeriesRefsForOrg(
   manifest: CollectionManifestDoc,
   collectionId: string,
@@ -3738,21 +3978,52 @@ function normalizeManifestSeriesRefsForOrg(
   };
 }
 
+function withManifestSeriesRefs(manifest: CollectionManifestDoc, refs: ManifestSeriesRef[]): CollectionManifestDoc {
+  const nextManifest = structuredClone(manifest);
+  const root = nextManifest.content[0];
+  const existingMetaNode = (root.content ?? []).find((node) => node.type === 'collectionMeta');
+  const collectionMetaNode: PMNode =
+    existingMetaNode != null
+      ? structuredClone(existingMetaNode as PMNode)
+      : {
+          type: 'collectionMeta',
+          content: [],
+        };
+
+  const seriesRefNodes = refs.map((ref) => ({
+    type: 'seriesRef',
+    attrs: {
+      seriesId: ref.seriesId,
+      title: ref.title,
+      order: ref.order,
+      docName: ref.docName,
+    },
+  }));
+  root.content = [
+    collectionMetaNode,
+    ...seriesRefNodes,
+  ] as CollectionManifestDoc['content'][0]['content'];
+  return nextManifest;
+}
+
 function readManifestSeriesRefs(manifest: CollectionManifestDoc): ManifestSeriesRef[] {
   const root = manifest.content[0];
   const nodes = root.content ?? [];
 
   const refs: ManifestSeriesRef[] = [];
-  for (const node of nodes) {
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
     if (node.type !== 'seriesRef') {
       continue;
     }
 
     const attrs = (node as PMNode).attrs ?? {};
+    const rawOrder = Number(attrs.order ?? index + 1);
+    const normalizedOrder = Number.isFinite(rawOrder) && rawOrder > 0 ? Math.floor(rawOrder) : index + 1;
     refs.push({
       seriesId: String(attrs.seriesId ?? ''),
       title: String(attrs.title ?? 'Untitled Series'),
-      order: Number(attrs.order ?? 0),
+      order: normalizedOrder,
       docName: String(attrs.docName ?? ''),
     });
   }
@@ -3760,11 +4031,13 @@ function readManifestSeriesRefs(manifest: CollectionManifestDoc): ManifestSeries
   return refs.sort((a, b) => a.order - b.order);
 }
 
-function flattenHierarchyHeadingsForDocument(root: HierarchyNode): HierarchyHeading[] {
+function flattenHierarchyHeadingsForDocument(root: HierarchyNode, rootSeriesOrder: number = 1): HierarchyHeading[] {
   const headings: HierarchyHeading[] = [];
+  const normalizedRootSeriesOrder =
+    Number.isFinite(rootSeriesOrder) && rootSeriesOrder > 0 ? Math.floor(rootSeriesOrder) : 1;
 
   const walk = (node: HierarchyNode, depth: number, path: number[]) => {
-    const ordinal = depth === 0 ? 1 : path[path.length - 1] ?? 1;
+    const ordinal = depth === 0 ? normalizedRootSeriesOrder : path[path.length - 1] ?? 1;
     headings.push({
       id: node.id,
       level: node.level,
@@ -3824,7 +4097,7 @@ function createPlaceholderManifest(collectionId: string, title: string): Collect
                 content: [
                   {
                     type: 'text',
-                    text: 'Synced from canonical org index. Series documents will load on demand.',
+                    text: PLACEHOLDER_COLLECTION_META_TEXT,
                   },
                 ],
               },
@@ -3865,7 +4138,7 @@ function createPlaceholderSeriesDoc(seriesId: string, title: string): SeriesDoc 
                 content: [
                   {
                     type: 'text',
-                    text: 'Series content will sync here once loaded from the canonical room.',
+                    text: PLACEHOLDER_SERIES_BODY_TEXT,
                   },
                 ],
               },
@@ -3875,6 +4148,27 @@ function createPlaceholderSeriesDoc(seriesId: string, title: string): SeriesDoc 
       },
     ],
   };
+}
+
+function isPlaceholderManifestDoc(manifest: CollectionManifestDoc): boolean {
+  if (readManifestSeriesRefs(manifest).length > 0) {
+    return false;
+  }
+  const description = readCollectionDescription(manifest);
+  return description.includes('Synced from canonical org index');
+}
+
+function isPlaceholderSeriesDoc(doc: SeriesDoc): boolean {
+  const root = doc.content.find((node) => node.type === 'series');
+  if (!root) {
+    return false;
+  }
+  const body = (root.content ?? []).find((node) => node.type === 'seriesBody');
+  if (!body) {
+    return false;
+  }
+  const text = readPlainText(body as PMNode).replace(/\s+/g, ' ').trim();
+  return text.includes(PLACEHOLDER_SERIES_BODY_TEXT);
 }
 
 function buildCanonicalSeriesSeeds(args: {
@@ -3917,6 +4211,16 @@ function buildCanonicalSeriesSeeds(args: {
 }
 
 function createInitialWorkspace(): WorkspaceState {
+  if (typeof window !== 'undefined' && defaultCollabEnabled()) {
+    return {
+      manifestsByCollectionId: {},
+      collectionOrder: [],
+      seriesDocs: {},
+      activeCollectionId: '',
+      activeSeriesDocName: '',
+    };
+  }
+
   const primaryManifestDoc = structuredClone(manifestFixture) as CollectionManifestDoc;
   const secondaryManifestDoc = createSecondaryManifestStub();
   const sourceDoc = createSeriesAStub();
