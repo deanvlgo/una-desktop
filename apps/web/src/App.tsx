@@ -378,6 +378,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     [workspace.activeCollectionId, workspace.manifestsByCollectionId],
   );
   const workspaceRef = useRef(workspace);
+  const manualCollectionSelectionRef = useRef(false);
 
   useEffect(() => {
     workspaceRef.current = workspace;
@@ -546,7 +547,10 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
       const nextActiveCollectionId = canonicalOrder.includes(previous.activeCollectionId)
         ? previous.activeCollectionId
-        : (canonicalOrder[0] ?? previous.activeCollectionId);
+        : (canonicalOrder.find((collectionId) => {
+            const manifest = nextManifests[collectionId];
+            return manifest ? readManifestSeriesRefs(manifest).length > 0 : false;
+          }) ?? canonicalOrder[0] ?? previous.activeCollectionId);
 
       return {
         ...previous,
@@ -649,6 +653,56 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       activeSeriesDocName: fallbackDocName,
     }));
   }, [seriesRefs, workspace.activeSeriesDocName]);
+
+  useEffect(() => {
+    if (manualCollectionSelectionRef.current) {
+      return;
+    }
+
+    const activeManifest = workspace.activeCollectionId
+      ? workspace.manifestsByCollectionId[workspace.activeCollectionId]
+      : null;
+    if (activeManifest && readManifestSeriesRefs(activeManifest).length > 0) {
+      return;
+    }
+
+    const fallbackCollectionId = workspace.collectionOrder.find((collectionId) => {
+      const manifest = workspace.manifestsByCollectionId[collectionId];
+      return manifest ? readManifestSeriesRefs(manifest).length > 0 : false;
+    });
+    if (!fallbackCollectionId || fallbackCollectionId === workspace.activeCollectionId) {
+      return;
+    }
+
+    setWorkspace((previous) => {
+      if (manualCollectionSelectionRef.current) {
+        return previous;
+      }
+
+      const currentManifest = previous.activeCollectionId
+        ? previous.manifestsByCollectionId[previous.activeCollectionId]
+        : null;
+      if (currentManifest && readManifestSeriesRefs(currentManifest).length > 0) {
+        return previous;
+      }
+
+      const nextCollectionId = previous.collectionOrder.find((collectionId) => {
+        const manifest = previous.manifestsByCollectionId[collectionId];
+        return manifest ? readManifestSeriesRefs(manifest).length > 0 : false;
+      });
+      if (!nextCollectionId) {
+        return previous;
+      }
+
+      const nextManifest = previous.manifestsByCollectionId[nextCollectionId];
+      const nextSeriesDocName = nextManifest ? readManifestSeriesRefs(nextManifest)[0]?.docName ?? '' : '';
+      return {
+        ...previous,
+        activeCollectionId: nextCollectionId,
+        activeSeriesDocName: nextSeriesDocName || previous.activeSeriesDocName,
+      };
+    });
+  }, [workspace.activeCollectionId, workspace.collectionOrder, workspace.manifestsByCollectionId]);
 
   const activeSeriesDoc = useMemo(() => {
     if (!activeSeriesRef) {
@@ -1605,12 +1659,20 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     });
   }, []);
 
-  const openCollectionFromBrowser = useCallback(
+  const setActiveCollectionFromUser = useCallback(
     (collectionId: string) => {
+      manualCollectionSelectionRef.current = true;
       setActiveCollectionId(collectionId);
-      setRailPanelMode('hierarchy');
     },
     [setActiveCollectionId],
+  );
+
+  const openCollectionFromBrowser = useCallback(
+    (collectionId: string) => {
+      setActiveCollectionFromUser(collectionId);
+      setRailPanelMode('hierarchy');
+    },
+    [setActiveCollectionFromUser],
   );
 
   const beginCollectionTitleRename = useCallback(
@@ -1618,9 +1680,9 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       setCollectionTitleMenuOpenId(null);
       setRenamingCollectionId(collectionId);
       setCollectionTitleDraft(title);
-      setActiveCollectionId(collectionId);
+      setActiveCollectionFromUser(collectionId);
     },
-    [setActiveCollectionId],
+    [setActiveCollectionFromUser],
   );
 
   const commitCollectionTitleRename = useCallback(
@@ -2450,7 +2512,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                           <div
                             className="manifest-series__open"
                             onClick={() => {
-                              setActiveCollectionId(collection.collectionId);
+                              setActiveCollectionFromUser(collection.collectionId);
                               setCollectionTitleMenuOpenId(null);
                               setExpandedCollectionId((current) =>
                                 current === collection.collectionId ? null : collection.collectionId,
@@ -2459,7 +2521,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                             onKeyDown={(event) => {
                               if (event.key === 'Enter' || event.key === ' ') {
                                 event.preventDefault();
-                                setActiveCollectionId(collection.collectionId);
+                                setActiveCollectionFromUser(collection.collectionId);
                                 setCollectionTitleMenuOpenId(null);
                                 setExpandedCollectionId((current) =>
                                   current === collection.collectionId ? null : collection.collectionId,
