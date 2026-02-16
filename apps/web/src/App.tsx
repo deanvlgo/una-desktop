@@ -1919,7 +1919,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   }, [workspace.seriesDocs]);
 
   const runSeriesExport = useCallback(
-    (format: ExportFormat) => {
+    async (format: ExportFormat) => {
       if (!activeManifestDoc || !activeSeriesDoc) {
         return;
       }
@@ -1929,7 +1929,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       const activeSeriesTitle = activeSeriesRef?.title ?? String(activeHierarchy?.title ?? 'Untitled Series');
 
       try {
-        exportSeriesFindingAid({
+        await exportSeriesFindingAid({
           format,
           input: {
             collectionId: String(manifestRoot.attrs?.collectionId ?? workspace.activeCollectionId),
@@ -1959,7 +1959,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   );
 
   const runCollectionExport = useCallback(
-    (collectionId: string, format: ExportFormat) => {
+    async (collectionId: string, format: ExportFormat) => {
       const manifest = workspace.manifestsByCollectionId[collectionId];
       if (!manifest) {
         return;
@@ -1990,7 +1990,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       const collectionTitle = String(manifestRoot.attrs?.title ?? 'Untitled Collection');
 
       try {
-        exportCollectionFindingAid({
+        await exportCollectionFindingAid({
           format,
           input: {
             collectionId: String(manifestRoot.attrs?.collectionId ?? collectionId),
@@ -2279,7 +2279,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                                         className="title-menu__item"
                                         onClick={(event) => {
                                           event.stopPropagation();
-                                          runCollectionExport(collection.collectionId, 'word');
+                                          void runCollectionExport(collection.collectionId, 'word');
                                         }}
                                       >
                                         Export Word
@@ -2290,7 +2290,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                                         className="title-menu__item"
                                         onClick={(event) => {
                                           event.stopPropagation();
-                                          runCollectionExport(collection.collectionId, 'ead');
+                                          void runCollectionExport(collection.collectionId, 'ead');
                                         }}
                                       >
                                         Export EAD XML
@@ -2301,7 +2301,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                                         className="title-menu__item"
                                         onClick={(event) => {
                                           event.stopPropagation();
-                                          runCollectionExport(collection.collectionId, 'html');
+                                          void runCollectionExport(collection.collectionId, 'html');
                                         }}
                                       >
                                         Export HTML
@@ -2312,7 +2312,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                                         className="title-menu__item"
                                         onClick={(event) => {
                                           event.stopPropagation();
-                                          runCollectionExport(collection.collectionId, 'pdf');
+                                          void runCollectionExport(collection.collectionId, 'pdf');
                                         }}
                                       >
                                         Export PDF
@@ -2407,7 +2407,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                           type="button"
                           role="menuitem"
                           className="title-menu__item"
-                          onClick={() => runSeriesExport('word')}
+                          onClick={() => void runSeriesExport('word')}
                         >
                           Export Word
                         </button>
@@ -2415,7 +2415,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                           type="button"
                           role="menuitem"
                           className="title-menu__item"
-                          onClick={() => runSeriesExport('ead')}
+                          onClick={() => void runSeriesExport('ead')}
                         >
                           Export EAD XML
                         </button>
@@ -2423,7 +2423,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                           type="button"
                           role="menuitem"
                           className="title-menu__item"
-                          onClick={() => runSeriesExport('html')}
+                          onClick={() => void runSeriesExport('html')}
                         >
                           Export HTML
                         </button>
@@ -2431,7 +2431,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                           type="button"
                           role="menuitem"
                           className="title-menu__item"
-                          onClick={() => runSeriesExport('pdf')}
+                          onClick={() => void runSeriesExport('pdf')}
                         >
                           Export PDF
                         </button>
@@ -2859,32 +2859,94 @@ export function App({ currentUser, token, onLogout }: AppProps) {
             className={historyPanelCollapsed ? 'panel revisions-panel revisions-panel--collapsed' : 'panel revisions-panel'}
             aria-label="Series revision history"
           >
-            <div className="revisions-panel__header">
-              <div className="revisions-panel__heading">
-                <h3>Revisions</h3>
-                <p>{activeSeriesRef?.title ?? historyDocName}</p>
-              </div>
-              <button
-                type="button"
-                className="revisions-panel__toggle"
-                onClick={() => setHistoryPanelCollapsed((current) => !current)}
-                aria-label={historyPanelCollapsed ? 'Expand revisions panel' : 'Collapse revisions panel'}
-                title={historyPanelCollapsed ? 'Expand' : 'Collapse'}
-              >
-                {historyPanelCollapsed ? '◀' : '▶'}
-              </button>
-            </div>
-
             {historyPanelCollapsed ? (
-              <p className="revisions-panel__status revisions-panel__status--collapsed">
-                {historyLoading
-                  ? 'Loading revisions…'
-                  : historySnapshots.length > 0
-                    ? `${historySnapshots.length} revisions loaded.`
-                    : 'No revisions yet for this finding aid.'}
-              </p>
+              <div className="workspace-context-actions">
+                <button
+                  type="button"
+                  className="revisions-panel__collapsed-tab"
+                  onClick={() => setHistoryPanelCollapsed(false)}
+                  aria-label="Open revisions panel"
+                  title="Open revisions"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M12 5.5a6.5 6.5 0 1 0 6.38 7.75 1 1 0 1 1 1.96.38A8.5 8.5 0 1 1 12 3.5h.25l-1.04-1.04a1 1 0 0 1 1.42-1.42l2.75 2.75a1 1 0 0 1 0 1.42l-2.75 2.75a1 1 0 1 1-1.42-1.42L12.25 5.5H12Z"
+                      fill="currentColor"
+                    />
+                    <path
+                      d="M12 7.75a1 1 0 0 1 1 1v2.62l1.88 1.13a1 1 0 0 1-1.03 1.72l-2.37-1.42a1 1 0 0 1-.48-.86V8.75a1 1 0 0 1 1-1Z"
+                      fill="currentColor"
+                    />
+                  </svg>
+                </button>
+
+                <div className="export-flyout">
+                  <button type="button" className="revisions-panel__collapsed-tab" aria-label="Export options" title="Export options">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d="M12 3a1 1 0 0 1 1 1v9.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4 3.98a1 1 0 0 1-1.4 0l-4-3.98a1 1 0 1 1 1.4-1.42l2.3 2.3V4a1 1 0 0 1 1-1ZM5 18a1 1 0 0 1 1 1v1h12v-1a1 1 0 1 1 2 0v2a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Z"
+                        fill="currentColor"
+                      />
+                    </svg>
+                  </button>
+
+                  <div className="export-flyout__panel" role="menu" aria-label="Export finding aid">
+                    <div className="export-flyout__group">
+                      <div className="export-flyout__item">Entire Collection</div>
+                      <div className="export-flyout__submenu">
+                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'word')}>
+                          DOCX
+                        </button>
+                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'ead')}>
+                          EAD XML
+                        </button>
+                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'html')}>
+                          HTML
+                        </button>
+                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'pdf')}>
+                          PDF
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="export-flyout__group">
+                      <div className="export-flyout__item">Active Series</div>
+                      <div className="export-flyout__submenu">
+                        <button type="button" onClick={() => void runSeriesExport('word')}>
+                          DOCX
+                        </button>
+                        <button type="button" onClick={() => void runSeriesExport('ead')}>
+                          EAD XML
+                        </button>
+                        <button type="button" onClick={() => void runSeriesExport('html')}>
+                          HTML
+                        </button>
+                        <button type="button" onClick={() => void runSeriesExport('pdf')}>
+                          PDF
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             ) : (
               <>
+                <div className="revisions-panel__header">
+                  <div className="revisions-panel__heading">
+                    <h3>Revisions</h3>
+                    <p>{activeSeriesRef?.title ?? historyDocName}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="revisions-panel__toggle"
+                    onClick={() => setHistoryPanelCollapsed(true)}
+                    aria-label="Collapse revisions panel"
+                    title="Collapse"
+                  >
+                    ▶
+                  </button>
+                </div>
+
                 {historyLoading ? <p className="revisions-panel__status">Loading revisions…</p> : null}
                 {historyError ? <p className="revisions-panel__error">{historyError}</p> : null}
                 {!historyLoading && historySnapshots.length === 0 ? (

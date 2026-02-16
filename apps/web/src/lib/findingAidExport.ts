@@ -1,4 +1,14 @@
 import type { PMNode, SeriesDoc } from '../../../../src/contracts/types';
+import {
+  AlignmentType,
+  Document as DocxDocument,
+  HeadingLevel,
+  Packer,
+  PageOrientation,
+  Paragraph,
+  TableOfContents,
+  TextRun,
+} from 'docx';
 
 export type ExportFormat = 'word' | 'ead' | 'html' | 'pdf';
 
@@ -62,14 +72,14 @@ type HtmlBuildOptions = {
 
 const ESTIMATED_PAGE_CAPACITY = 3000;
 
-export function exportSeriesFindingAid(args: { format: ExportFormat; input: SeriesExportInput }) {
+export async function exportSeriesFindingAid(args: { format: ExportFormat; input: SeriesExportInput }) {
   const model = buildSeriesModel(args.input);
-  runExport(model, args.format);
+  await runExport(model, args.format);
 }
 
-export function exportCollectionFindingAid(args: { format: ExportFormat; input: CollectionExportInput }) {
+export async function exportCollectionFindingAid(args: { format: ExportFormat; input: CollectionExportInput }) {
   const model = buildCollectionModel(args.input);
-  runExport(model, args.format);
+  await runExport(model, args.format);
 }
 
 function buildSeriesModel(input: SeriesExportInput): FindingAidExportModel {
@@ -357,7 +367,7 @@ function estimateSectionLoad(section: FindingAidSection): number {
   return 220 + section.title.length * 2 + paragraphLoad + fieldLoad + section.depth * 24;
 }
 
-function runExport(model: FindingAidExportModel, format: ExportFormat) {
+async function runExport(model: FindingAidExportModel, format: ExportFormat) {
   const baseFilename = sanitizeFilename(
     `${model.title}-${model.scope === 'collection' ? 'collection' : 'series'}-finding-aid`,
   );
@@ -376,8 +386,8 @@ function runExport(model: FindingAidExportModel, format: ExportFormat) {
   }
 
   if (format === 'word') {
-    const wordHtml = wrapWordHtml(html);
-    downloadTextFile(`${baseFilename}.doc`, wordHtml, 'application/msword;charset=utf-8');
+    const docxBlob = await buildDocxBlob(model);
+    downloadBlobFile(`${baseFilename}.docx`, docxBlob);
     return;
   }
 
@@ -621,6 +631,11 @@ function buildFindingAidHtml(model: FindingAidExportModel, options: HtmlBuildOpt
       }
 
       @media print {
+        @page {
+          size: letter portrait;
+          margin: 0.45in;
+        }
+
         body {
           background: #fff;
         }
@@ -755,45 +770,225 @@ function toEadLevel(level: FindingAidLevel): string {
   return level;
 }
 
-function wrapWordHtml(html: string): string {
-  return html
-    .replace('<!doctype html>', '')
-    .replace(
-      '<html lang="en">',
-      `<html lang="en" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">`,
+function depthToHeading(depth: number) {
+  if (depth <= 0) {
+    return HeadingLevel.HEADING_1;
+  }
+  if (depth === 1) {
+    return HeadingLevel.HEADING_2;
+  }
+  if (depth === 2) {
+    return HeadingLevel.HEADING_3;
+  }
+  if (depth === 3) {
+    return HeadingLevel.HEADING_4;
+  }
+  return HeadingLevel.HEADING_5;
+}
+
+async function buildDocxBlob(model: FindingAidExportModel): Promise<Blob> {
+  const generatedAt = model.generatedAt.toLocaleString();
+  const children: Array<Paragraph | TableOfContents> = [];
+
+  children.push(
+    new Paragraph({
+      text: model.subtitle,
+      heading: HeadingLevel.HEADING_3,
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 220 },
+    }),
+  );
+  children.push(
+    new Paragraph({
+      text: model.title,
+      heading: HeadingLevel.TITLE,
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 200 },
+    }),
+  );
+  children.push(
+    new Paragraph({
+      text: model.institutionName,
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 140 },
+    }),
+  );
+  children.push(
+    new Paragraph({
+      children: [
+        new TextRun({
+          text: `Collection ID: ${model.collectionId} · Generated: ${generatedAt}`,
+          italics: true,
+        }),
+      ],
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 240 },
+    }),
+  );
+  if (model.description.length > 0) {
+    children.push(
+      new Paragraph({
+        text: model.description,
+        alignment: AlignmentType.LEFT,
+        spacing: { after: 120 },
+      }),
     );
+  }
+
+  children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+  children.push(
+    new Paragraph({
+      text: 'Table of Contents',
+      heading: HeadingLevel.HEADING_1,
+      spacing: { after: 120 },
+    }),
+  );
+  children.push(
+    new TableOfContents(' ', {
+      hyperlink: true,
+      headingStyleRange: '1-5',
+    }),
+  );
+
+  children.push(new Paragraph({ text: '', pageBreakBefore: true }));
+
+  for (const section of model.sections) {
+    const pathLabel = section.pathSegments.length > 0 ? section.pathSegments.join('.') : '';
+    const metaLine = [
+      section.level.toUpperCase(),
+      pathLabel.length > 0 ? pathLabel : null,
+      section.refCode ? `Ref: ${section.refCode}` : null,
+      section.dates ? `Dates: ${section.dates}` : null,
+      `p. ${section.pageNumber}`,
+    ]
+      .filter((value): value is string => value != null && value.length > 0)
+      .join(' · ');
+
+    children.push(
+      new Paragraph({
+        text: section.title,
+        heading: depthToHeading(section.depth),
+        spacing: { before: 260, after: 120 },
+      }),
+    );
+    children.push(
+      new Paragraph({
+        children: [new TextRun({ text: metaLine, italics: true })],
+        spacing: { after: 120 },
+      }),
+    );
+
+    for (const paragraph of section.paragraphs) {
+      children.push(
+        new Paragraph({
+          text: paragraph,
+          spacing: { after: 100 },
+        }),
+      );
+    }
+
+    if (section.fields.length > 0) {
+      children.push(
+        new Paragraph({
+          children: [new TextRun({ text: 'Item Metadata', bold: true, underline: {} })],
+          spacing: { before: 100, after: 80 },
+        }),
+      );
+      for (const field of section.fields) {
+        children.push(
+          new Paragraph({
+            text: `${field.key}: ${field.value}`,
+            bullet: { level: 0 },
+            spacing: { after: 60 },
+          }),
+        );
+      }
+    }
+  }
+
+  const doc = new DocxDocument({
+    sections: [
+      {
+        properties: {
+          page: {
+            size: {
+              orientation: PageOrientation.PORTRAIT,
+            },
+          },
+        },
+        children,
+      },
+    ],
+  });
+
+  return Packer.toBlob(doc);
 }
 
 function openPrintPreview(html: string, title: string) {
-  if (typeof window === 'undefined') {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
     throw new Error('PDF export is only available in a browser.');
   }
 
-  const popup = window.open('', '_blank', 'noopener,noreferrer');
-  if (!popup) {
-    const fallbackName = `${sanitizeFilename(title)}-print.html`;
-    downloadTextFile(fallbackName, html, 'text/html;charset=utf-8');
-    window.alert('Popup was blocked. Downloaded a printable HTML file instead.');
-    return;
-  }
+  const frame = document.createElement('iframe');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.style.position = 'fixed';
+  frame.style.right = '0';
+  frame.style.bottom = '0';
+  frame.style.width = '0';
+  frame.style.height = '0';
+  frame.style.border = '0';
+  frame.style.opacity = '0';
+  frame.style.pointerEvents = 'none';
 
-  popup.document.open();
-  popup.document.write(html);
-  popup.document.close();
-  popup.document.title = title;
-
-  let printed = false;
-  const triggerPrint = () => {
-    if (printed) {
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) {
       return;
     }
-    printed = true;
-    popup.focus();
-    popup.print();
+    cleaned = true;
+    frame.remove();
   };
 
-  popup.addEventListener('load', triggerPrint, { once: true });
-  window.setTimeout(triggerPrint, 450);
+  const printFromFrame = () => {
+    const printWindow = frame.contentWindow;
+    if (!printWindow) {
+      cleanup();
+      window.alert('Could not open print preview. Please allow printing and try again.');
+      return;
+    }
+
+    printWindow.document.title = title;
+    printWindow.addEventListener('afterprint', cleanup, { once: true });
+    printWindow.focus();
+    printWindow.print();
+
+    // Fallback cleanup if afterprint doesn't fire.
+    window.setTimeout(cleanup, 120000);
+  };
+
+  frame.addEventListener('load', () => {
+    window.setTimeout(printFromFrame, 40);
+  });
+
+  document.body.append(frame);
+  try {
+    frame.srcdoc = html;
+  } catch {
+    cleanup();
+    const popup = window.open('', '_blank', 'noopener,noreferrer');
+    if (!popup) {
+      window.alert('Could not open print preview. Please allow popups and printing, then retry.');
+      return;
+    }
+    popup.document.open();
+    popup.document.write(html);
+    popup.document.close();
+    popup.document.title = title;
+    popup.addEventListener('load', () => {
+      popup.focus();
+      popup.print();
+    }, { once: true });
+  }
 }
 
 function downloadTextFile(filename: string, content: string, mimeType: string) {
@@ -802,6 +997,22 @@ function downloadTextFile(filename: string, content: string, mimeType: string) {
   }
 
   const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.rel = 'noopener';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadBlobFile(filename: string, blob: Blob) {
+  if (typeof document === 'undefined') {
+    throw new Error('File download is only available in a browser.');
+  }
+
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;

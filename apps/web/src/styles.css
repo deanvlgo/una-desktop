@@ -679,8 +679,8 @@ body {
 }
 
 .workspace-context--collapsed {
-  width: min(220px, 18vw);
-  min-width: 180px;
+  width: 56px;
+  min-width: 56px;
 }
 
 .workspace-main__mode-row {
@@ -2302,9 +2302,11 @@ body {
 }
 
 .revisions-panel--collapsed {
-  min-height: 220px;
-  display: grid;
-  align-content: start;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: auto;
+  padding: 0.35rem 0.25rem;
 }
 
 .revisions-panel__header {
@@ -2356,6 +2358,105 @@ body {
   cursor: pointer;
 }
 
+.workspace-context-actions {
+  display: grid;
+  gap: 0.36rem;
+}
+
+.export-flyout {
+  position: relative;
+}
+
+.export-flyout__panel {
+  position: absolute;
+  left: calc(100% + 0.42rem);
+  top: 0;
+  min-width: 12rem;
+  border: 1px solid #dbe3f0;
+  border-radius: 0.6rem;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.16);
+  padding: 0.28rem;
+  opacity: 0;
+  transform: translateY(4px);
+  pointer-events: none;
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 80;
+}
+
+.export-flyout:hover .export-flyout__panel,
+.export-flyout:focus-within .export-flyout__panel {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.export-flyout__group {
+  position: relative;
+}
+
+.export-flyout__item {
+  width: 100%;
+  border: 0;
+  border-radius: 0.42rem;
+  background: transparent;
+  color: #111827;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-align: left;
+  padding: 0.36rem 0.44rem;
+  cursor: default;
+}
+
+.export-flyout__group + .export-flyout__group {
+  margin-top: 0.08rem;
+}
+
+.export-flyout__group:hover > .export-flyout__item {
+  background: #f3f7ff;
+}
+
+.export-flyout__submenu {
+  position: absolute;
+  left: calc(100% + 0.26rem);
+  top: 0;
+  min-width: 8rem;
+  border: 1px solid #dbe3f0;
+  border-radius: 0.5rem;
+  background: #ffffff;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.14);
+  padding: 0.24rem;
+  opacity: 0;
+  transform: translateY(3px);
+  pointer-events: none;
+  transition: opacity 120ms ease, transform 120ms ease;
+  z-index: 90;
+}
+
+.export-flyout__group:hover .export-flyout__submenu,
+.export-flyout__group:focus-within .export-flyout__submenu {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.export-flyout__submenu button {
+  width: 100%;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: #0f172a;
+  font-size: 0.73rem;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.3rem 0.4rem;
+  cursor: pointer;
+}
+
+.export-flyout__submenu button:hover {
+  background: #eef4ff;
+}
+
 .revisions-panel__collapsed-tab svg {
   width: 1.2rem;
   height: 1.2rem;
@@ -2366,10 +2467,6 @@ body {
 .revisions-panel__error {
   margin: 0.7rem 0 0;
   font-size: 0.78rem;
-}
-
-.revisions-panel__status--collapsed {
-  margin-top: 0.55rem;
 }
 
 .revisions-panel__error {
