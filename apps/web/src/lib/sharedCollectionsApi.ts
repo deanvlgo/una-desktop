@@ -60,7 +60,7 @@ const ENTRY_TYPE_VALUES = new Set<NonNullable<OrgCollectionIndexEntry['entryType
 
 function readEnabledFlag(raw: string | undefined): boolean {
   if (!raw) {
-    return true;
+    return false;
   }
   const normalized = raw.trim().toLowerCase();
   return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
