@@ -29,7 +29,7 @@ type CollabClientOptions = {
   url: string;
   user: CollabUser;
   instanceId: string;
-  authToken?: string | null;
+  authToken: string;
   onDocChanged?: (docName: string) => void;
   onPresenceChanged?: () => void;
 };
@@ -66,15 +66,45 @@ export class CollabClient {
     this.options = options;
   }
 
+  private disconnectRoom(docName: string): void {
+    const room = this.rooms.get(docName);
+    if (!room) {
+      return;
+    }
+
+    const mapObserver = this.mapObservers.get(docName);
+    if (mapObserver) {
+      room.map.unobserve(mapObserver);
+    }
+
+    const awarenessObserver = this.awarenessObservers.get(docName);
+    if (awarenessObserver && room.provider.awareness) {
+      room.provider.awareness.off('change', awarenessObserver);
+    }
+
+    room.provider.destroy();
+    this.rooms.delete(docName);
+    this.mapObservers.delete(docName);
+    this.awarenessObservers.delete(docName);
+    this.publishSignatures.delete(docName);
+    this.syncedRooms.delete(docName);
+  }
+
   connectRoom(seed: DocSeed): void {
     if (this.rooms.has(seed.docName)) {
+      return;
+    }
+
+    const authToken = this.options.authToken.trim();
+    if (!authToken) {
+      console.error('[collab] Refusing to connect room without an auth token.', seed.docName);
       return;
     }
 
     const provider = new HocuspocusProvider({
       url: this.options.url,
       name: seed.docName,
-      ...(this.options.authToken ? { token: this.options.authToken } : {}),
+      token: authToken,
       onSynced: ({ state }) => {
         if (!state) {
           this.syncedRooms.delete(seed.docName);
@@ -119,26 +149,29 @@ export class CollabClient {
     });
   }
 
-  disconnectAll(): void {
-    for (const [docName, room] of this.rooms.entries()) {
-      const mapObserver = this.mapObservers.get(docName);
-      if (mapObserver) {
-        room.map.unobserve(mapObserver);
-      }
-
-      const awarenessObserver = this.awarenessObservers.get(docName);
-      if (awarenessObserver && room.provider.awareness) {
-        room.provider.awareness.off('change', awarenessObserver);
-      }
-
-      room.provider.destroy();
+  syncRooms(seeds: DocSeed[]): void {
+    const desired = new Map<string, DocSeed>();
+    for (const seed of seeds) {
+      desired.set(seed.docName, seed);
     }
 
-    this.rooms.clear();
-    this.mapObservers.clear();
-    this.awarenessObservers.clear();
-    this.publishSignatures.clear();
-    this.syncedRooms.clear();
+    for (const existingDocName of this.rooms.keys()) {
+      if (!desired.has(existingDocName)) {
+        this.disconnectRoom(existingDocName);
+      }
+    }
+
+    for (const seed of desired.values()) {
+      if (!this.rooms.has(seed.docName)) {
+        this.connectRoom(seed);
+      }
+    }
+  }
+
+  disconnectAll(): void {
+    for (const docName of Array.from(this.rooms.keys())) {
+      this.disconnectRoom(docName);
+    }
   }
 
   setFocus(docName: string, focusId: string | null): void {

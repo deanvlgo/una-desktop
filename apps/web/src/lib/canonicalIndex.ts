@@ -22,12 +22,17 @@ export type OrgIndexConnection = {
 };
 
 export function connectOrgIndex(orgId: string, token: string): OrgIndexConnection {
+  const authToken = token.trim();
+  if (!authToken) {
+    throw new Error('[collab] Missing auth token for org index connection.');
+  }
+
   const doc = new Y.Doc();
   const provider = new HocuspocusProvider({
     url: hocusUrl(),
     name: orgCollectionsDocName(orgId),
     document: doc,
-    token,
+    token: authToken,
   });
 
   const map = doc.getMap<string>(COLLECTIONS_MAP_KEY);
