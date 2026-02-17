@@ -258,6 +258,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const [collectionTitleMenuOpenId, setCollectionTitleMenuOpenId] = useState<string | null>(null);
   const [renamingCollectionId, setRenamingCollectionId] = useState<string | null>(null);
   const [collectionTitleDraft, setCollectionTitleDraft] = useState('');
+  const [orgIndexSynced, setOrgIndexSynced] = useState(false);
   const [seriesExportMenuOpen, setSeriesExportMenuOpen] = useState(false);
   const [debugMode, setDebugMode] = useState(() => {
     if (typeof window === 'undefined') {
@@ -318,9 +319,11 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     if (!orgId || !token) {
       setCanonicalEntriesById({});
       canonicalMapRef.current = null;
+      setOrgIndexSynced(false);
       return;
     }
 
+    setOrgIndexSynced(false);
     const connection = connectOrgIndex(orgId, token);
     canonicalMapRef.current = connection.map;
     let isDisposed = false;
@@ -339,12 +342,20 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     };
 
     connection.map.observe(refreshEntries);
-    connection.provider.on('synced', refreshEntries);
+    const handleSynced = ({ state }: { state: boolean }) => {
+      if (!state || isDisposed) {
+        return;
+      }
+      setOrgIndexSynced(true);
+      refreshEntries();
+    };
+    connection.provider.on('synced', handleSynced);
     refreshEntries();
 
     return () => {
       isDisposed = true;
       connection.map.unobserve(refreshEntries);
+      connection.provider.off('synced', handleSynced);
       canonicalMapRef.current = null;
       disconnectOrgIndex(connection);
     };
@@ -2505,11 +2516,12 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
   if (!activeManifestDoc || !activeSeriesDoc || !activeHierarchy || !currentFocusState) {
     const activeManifestIsPlaceholder = Boolean(activeManifestDoc) && isPlaceholderManifestDoc(activeManifestDoc);
-    const bootstrappingCollections = collabEnabled && workspace.collectionOrder.length === 0;
+    const bootstrappingCollections = collabEnabled && !orgIndexSynced;
     const bootstrappingSeries =
       Boolean(activeManifestDoc) &&
       ((seriesRefs.length > 0 && !activeSeriesDoc) || (activeManifestIsPlaceholder && seriesRefs.length === 0));
     const noSeriesAvailable = Boolean(activeManifestDoc) && seriesRefs.length === 0 && !activeManifestIsPlaceholder;
+    const noCollectionsAvailable = collabEnabled && orgIndexSynced && workspace.collectionOrder.length === 0;
     const showNoSeriesLoader = noSeriesAvailable && !showNoSeriesMessage;
     const bootstrapping = bootstrappingCollections || bootstrappingSeries || showNoSeriesLoader;
     return (
@@ -2518,6 +2530,8 @@ export function App({ currentUser, token, onLogout }: AppProps) {
           <div className="app-shell__loading" role="status" aria-live="polite" aria-label="Loading">
             <span className="app-shell__loading-dot" />
           </div>
+        ) : noCollectionsAvailable ? (
+          'No collections are available for this organization yet.'
         ) : noSeriesAvailable ? (
           'No series documents are available for this collection yet.'
         ) : (
