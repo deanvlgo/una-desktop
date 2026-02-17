@@ -1,5 +1,6 @@
 import Ajv2020 from 'ajv/dist/2020';
 import addFormats from 'ajv-formats';
+import type { ErrorObject } from 'ajv';
 
 import schema from '../schema/archival-editor.schema.json';
 import type { CollectionManifestDoc, PMDoc, SeriesDoc } from './types';
@@ -20,7 +21,7 @@ export function validateArchivalDoc(doc: unknown): ValidationResult {
     return { valid: true, errors: [] };
   }
 
-  const errors = (validate.errors ?? []).map((error) => {
+  const errors = (validate.errors ?? []).map((error: ErrorObject) => {
     const path = error.instancePath || '/';
     const keyword = error.keyword;
     const message = error.message ?? 'invalid';

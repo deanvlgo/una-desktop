@@ -268,6 +268,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   });
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [historyPanelCollapsed, setHistoryPanelCollapsed] = useState(true);
+  const [catalogSidebarOpen, setCatalogSidebarOpen] = useState(false);
   const [historySnapshots, setHistorySnapshots] = useState<HistorySnapshot[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -2555,6 +2556,142 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const focusedCatalogHeading = focusedNode
     ? formatHierarchyNodeHeading(focusedNode.level, focusedNodeOrdinal, focusedNode.title)
     : '';
+  const catalogSidebarVisible = catalogSidebarOpen && visibleMode === 'document';
+  const primaryViewMode =
+    visibleMode === 'json' ? 'json' : visibleMode === 'focus' ? 'focus' : catalogSidebarVisible ? 'split' : 'document';
+  const revisionsPanelVisible = !historyPanelCollapsed;
+  const contextRailVisible = catalogSidebarVisible || revisionsPanelVisible;
+  const contextClassName = contextRailVisible
+    ? catalogSidebarVisible
+      ? 'workspace-context workspace-context--catalog-open'
+      : 'workspace-context'
+    : 'workspace-context workspace-context--hidden';
+  const catalogFormContent = focusedNode ? (
+    <div
+      className={`cms-shell cms-shell--${focusedNode.level}`}
+      style={{ '--cms-level-color': cmsLevelColor } as CSSProperties}
+    >
+      <header className="cms-shell__header">
+        <div>
+          <span className="cms-shell__level">
+            {getHierarchyLevelLabel(focusedNode.level).toUpperCase()} {focusedNodeOrdinal}
+          </span>
+          <h3 className="cms-screen-title">{focusedCatalogHeading}</h3>
+          <p className="cms-screen-subtitle">Catalog Record</p>
+        </div>
+        {focusedNode.itemType ? <span className="cms-shell__item-type">{focusedNode.itemType}</span> : null}
+      </header>
+
+      <p className="cms-shell__node-id">Focused node: {focusedNode.id}</p>
+
+      {debugMode ? (
+        <div className="focused-meta">
+          <span className="focused-meta__chip">id: {focusedNode.id}</span>
+          <span className="focused-meta__chip">level: {focusedNode.level}</span>
+          {focusedNode.itemType ? <span className="focused-meta__chip">itemType: {focusedNode.itemType}</span> : null}
+        </div>
+      ) : null}
+
+      {(focusedNode.level === 'series' || focusedNode.level === 'subseries' || focusedNode.level === 'file') ? (
+        <>
+          <section className="cms-section">
+            <h4 className="cms-section__title">Title</h4>
+            <label className="field-input" htmlFor="title-editor">
+              <span>Title</span>
+              <CatalogCollaborativeTextInput
+                id="title-editor"
+                className="title-editor"
+                fieldId={`${focusedNode.id}:title`}
+                presence={catalogCursorByField[`${focusedNode.id}:title`] ?? []}
+                value={focusedNode.title}
+                onCatalogCursor={publishCatalogCursor}
+                onCatalogBlur={clearCatalogCursor}
+                onChange={(event) => {
+                  const title = event.target.value;
+                  applyHierarchyMetadataPatch(focusedNode.id, { title });
+                }}
+              />
+            </label>
+          </section>
+
+          {(['Core Metadata', 'Arrangement & Scope', 'Access & Rights', 'Digital'] as const).map((section) => {
+            const fields = CMS_FIELDS.filter((entry) => entry.section === section);
+            return (
+              <section key={section} className="cms-section">
+                <h4 className="cms-section__title">{section}</h4>
+                <div className="field-grid">
+                  {fields.map((field) => (
+                    <CmsMetadataInput
+                      key={`${focusedNode.id}-${field.key}`}
+                      fieldId={`${focusedNode.id}:meta:${field.key}`}
+                      presence={catalogCursorByField[`${focusedNode.id}:meta:${field.key}`] ?? []}
+                      label={field.label}
+                      value={metadataByKey[field.key] ?? ''}
+                      placeholder={field.placeholder}
+                      multiline={field.multiline}
+                      onCatalogCursor={publishCatalogCursor}
+                      onCatalogBlur={clearCatalogCursor}
+                      onChange={(nextValue) => applyHierarchyMetadataPatch(focusedNode.id, { [field.key]: nextValue })}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          })}
+        </>
+      ) : null}
+
+      {focusedNode.level === 'item' ? (
+        <>
+          <section className="cms-section">
+            <h4 className="cms-section__title">Linked Images</h4>
+            {linkedImages.length > 0 ? (
+              <div className="cms-image-grid">
+                {linkedImages.map((link) => (
+                  <a key={link.fieldId} href={link.url} target="_blank" rel="noreferrer" className="cms-image-card">
+                    <img src={link.url} alt={link.label} loading="lazy" />
+                    <span>{link.label}</span>
+                  </a>
+                ))}
+              </div>
+            ) : (
+              <p className="cms-empty-note">No linked image URLs detected yet. Add `imageUrl` or `thumbnailUrl` item fields.</p>
+            )}
+          </section>
+
+          <section className="cms-section">
+            <h4 className="cms-section__title">Item Metadata</h4>
+            <div className="cms-item-groups">
+              {groupedItemFields.map((group) => (
+                <article key={`${focusedNode.id}-${group.groupKey}`} className="cms-item-group">
+                  <h5>{group.groupLabel}</h5>
+                  <div className="field-grid">
+                    {group.fields.map((field) => (
+                      <FieldInput
+                        key={field.fieldId}
+                        field={field}
+                        fieldId={`${focusedNode.id}:item:${field.fieldId}`}
+                        presence={catalogCursorByField[`${focusedNode.id}:item:${field.fieldId}`] ?? []}
+                        onCatalogCursor={publishCatalogCursor}
+                        onCatalogBlur={clearCatalogCursor}
+                        onChange={(value) => {
+                          updateActiveSeriesDoc((doc) =>
+                            updateItemFieldValue(doc, focusedNode.id, field.fieldId, value),
+                          );
+                        }}
+                      />
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        </>
+      ) : null}
+    </div>
+  ) : (
+    <p>Select a node in the hierarchy rail.</p>
+  );
 
   return (
     <div className="app-shell">
@@ -2624,7 +2761,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         </div>
       </header>
 
-      <div className="workspace-grid">
+      <div className={catalogSidebarVisible ? 'workspace-grid workspace-grid--catalog-open' : 'workspace-grid'}>
         <aside className="workspace-rail">
           <section className="panel browser-panel">
             {railPanelMode === 'collections' ? (
@@ -2985,63 +3122,158 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
         <main className="workspace-main">
           <div className="workspace-main__mode-row">
-            <div className="mode-toggle" role="tablist" aria-label="Editor mode">
-              <button
-                type="button"
-                data-mode="document"
-                role="tab"
-                aria-selected={visibleMode === 'document'}
-                className={
-                  visibleMode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-                }
-                onClick={() =>
-                  updateCurrentFocusState((state) => ({
-                    ...state,
-                    mode: 'document',
-                    expandedIds: new Set(state.expandedIds),
-                  }))
-                }
-              >
-                Finding Aid View
-              </button>
-
-              <button
-                type="button"
-                data-mode="focus"
-                role="tab"
-                aria-selected={visibleMode === 'focus'}
-                className={
-                  visibleMode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
-                }
-                onClick={() =>
-                  updateCurrentFocusState((state) => ({
-                    ...state,
-                    mode: 'focus',
-                    expandedIds: new Set(state.expandedIds),
-                  }))
-                }
-              >
-                Catalog View
-              </button>
-
-              {jsonViewDebugMode ? (
+            <div className="workspace-main__toolbar">
+              <div className="mode-toggle" role="tablist" aria-label="Editor mode">
                 <button
                   type="button"
-                  data-mode="json"
+                  data-mode="document"
                   role="tab"
-                  aria-selected={visibleMode === 'json'}
-                  className={visibleMode === 'json' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'}
-                  onClick={() =>
+                  aria-selected={primaryViewMode === 'document'}
+                  className={
+                    primaryViewMode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                  }
+                  onClick={() => {
+                    setCatalogSidebarOpen(false);
                     updateCurrentFocusState((state) => ({
                       ...state,
-                      mode: 'json',
+                      mode: 'document',
                       expandedIds: new Set(state.expandedIds),
-                    }))
-                  }
+                    }));
+                  }}
                 >
-                  JSON View
+                  Finding Aid
                 </button>
-              ) : null}
+
+                <button
+                  type="button"
+                  data-mode="focus"
+                  role="tab"
+                  aria-selected={primaryViewMode === 'focus'}
+                  className={
+                    primaryViewMode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
+                  }
+                  onClick={() => {
+                    setCatalogSidebarOpen(false);
+                    updateCurrentFocusState((state) => ({
+                      ...state,
+                      mode: 'focus',
+                      expandedIds: new Set(state.expandedIds),
+                    }));
+                  }}
+                >
+                  Catalog
+                </button>
+
+                <button
+                  type="button"
+                  data-mode="split"
+                  role="tab"
+                  aria-selected={primaryViewMode === 'split'}
+                  className={primaryViewMode === 'split' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'}
+                  onClick={() => {
+                    setCatalogSidebarOpen(true);
+                    updateCurrentFocusState((state) => ({
+                      ...state,
+                      mode: 'document',
+                      expandedIds: new Set(state.expandedIds),
+                    }));
+                  }}
+                >
+                  Split
+                </button>
+
+                {jsonViewDebugMode ? (
+                  <button
+                    type="button"
+                    data-mode="json"
+                    role="tab"
+                    aria-selected={primaryViewMode === 'json'}
+                    className={primaryViewMode === 'json' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'}
+                    onClick={() =>
+                      updateCurrentFocusState((state) => ({
+                        ...state,
+                        mode: 'json',
+                        expandedIds: new Set(state.expandedIds),
+                      }))
+                    }
+                  >
+                    JSON View
+                  </button>
+                ) : null}
+              </div>
+
+              <div className="mode-toolbar-actions" role="toolbar" aria-label="Editor tools">
+                <button
+                  type="button"
+                  className={revisionsPanelVisible ? 'mode-toolbar__btn mode-toolbar__btn--active' : 'mode-toolbar__btn'}
+                  onClick={() => setHistoryPanelCollapsed((current) => !current)}
+                  aria-pressed={revisionsPanelVisible}
+                  aria-label={revisionsPanelVisible ? 'Hide revisions panel' : 'Show revisions panel'}
+                  title={revisionsPanelVisible ? 'Hide revisions' : 'Show revisions'}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      d="M12 5.5a6.5 6.5 0 1 0 6.38 7.75 1 1 0 1 1 1.96.38A8.5 8.5 0 1 1 12 3.5h.25l-1.04-1.04a1 1 0 0 1 1.42-1.42l2.75 2.75a1 1 0 0 1 0 1.42l-2.75 2.75a1 1 0 1 1-1.42-1.42L12.25 5.5H12Z"
+                      fill="currentColor"
+                    />
+                    <path
+                      d="M12 7.75a1 1 0 0 1 1 1v2.62l1.88 1.13a1 1 0 0 1-1.03 1.72l-2.37-1.42a1 1 0 0 1-.48-.86V8.75a1 1 0 0 1 1-1Z"
+                      fill="currentColor"
+                    />
+                  </svg>
+                  <span>Revisions</span>
+                </button>
+
+                <div className="export-flyout export-flyout--toolbar">
+                  <button type="button" className="mode-toolbar__btn" aria-label="Export options" title="Export options">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        d="M12 3a1 1 0 0 1 1 1v9.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4 3.98a1 1 0 0 1-1.4 0l-4-3.98a1 1 0 1 1 1.4-1.42l2.3 2.3V4a1 1 0 0 1 1-1ZM5 18a1 1 0 0 1 1 1v1h12v-1a1 1 0 1 1 2 0v2a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Z"
+                        fill="currentColor"
+                      />
+                    </svg>
+                    <span>Export</span>
+                  </button>
+
+                  <div className="export-flyout__panel" role="menu" aria-label="Export finding aid">
+                    <div className="export-flyout__group">
+                      <div className="export-flyout__item">Entire Collection</div>
+                      <div className="export-flyout__submenu">
+                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'word')}>
+                          DOCX
+                        </button>
+                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'ead')}>
+                          EAD XML
+                        </button>
+                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'html')}>
+                          HTML
+                        </button>
+                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'pdf')}>
+                          PDF
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="export-flyout__group">
+                      <div className="export-flyout__item">Active Series</div>
+                      <div className="export-flyout__submenu">
+                        <button type="button" onClick={() => void runSeriesExport('word')}>
+                          DOCX
+                        </button>
+                        <button type="button" onClick={() => void runSeriesExport('ead')}>
+                          EAD XML
+                        </button>
+                        <button type="button" onClick={() => void runSeriesExport('html')}>
+                          HTML
+                        </button>
+                        <button type="button" onClick={() => void runSeriesExport('pdf')}>
+                          PDF
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -3072,147 +3304,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
           ) : visibleMode === 'focus' ? (
             <section className="panel focus-panel cms-panel" aria-label="Catalog view">
               <p className="cms-panel__hint">Plain forms generated from the focused hierarchy node.</p>
-
-              {focusedNode ? (
-                <div
-                  className={`cms-shell cms-shell--${focusedNode.level}`}
-                  style={{ '--cms-level-color': cmsLevelColor } as CSSProperties}
-                >
-                  <header className="cms-shell__header">
-                    <div>
-                      <span className="cms-shell__level">
-                        {getHierarchyLevelLabel(focusedNode.level).toUpperCase()} {focusedNodeOrdinal}
-                      </span>
-                      <h3 className="cms-screen-title">{focusedCatalogHeading}</h3>
-                      <p className="cms-screen-subtitle">Catalog Record</p>
-                    </div>
-                    {focusedNode.itemType ? <span className="cms-shell__item-type">{focusedNode.itemType}</span> : null}
-                  </header>
-
-                  <p className="cms-shell__node-id">Focused node: {focusedNode.id}</p>
-
-                  {debugMode ? (
-                    <div className="focused-meta">
-                      <span className="focused-meta__chip">id: {focusedNode.id}</span>
-                      <span className="focused-meta__chip">level: {focusedNode.level}</span>
-                      {focusedNode.itemType ? (
-                        <span className="focused-meta__chip">itemType: {focusedNode.itemType}</span>
-                      ) : null}
-                    </div>
-                  ) : null}
-
-                  {(focusedNode.level === 'series' ||
-                    focusedNode.level === 'subseries' ||
-                    focusedNode.level === 'file') ? (
-                    <>
-                      <section className="cms-section">
-                        <h4 className="cms-section__title">Title</h4>
-                        <label className="field-input" htmlFor="title-editor">
-                          <span>Title</span>
-                          <CatalogCollaborativeTextInput
-                            id="title-editor"
-                            className="title-editor"
-                            fieldId={`${focusedNode.id}:title`}
-                            presence={catalogCursorByField[`${focusedNode.id}:title`] ?? []}
-                            value={focusedNode.title}
-                            onCatalogCursor={publishCatalogCursor}
-                            onCatalogBlur={clearCatalogCursor}
-                            onChange={(event) => {
-                              const title = event.target.value;
-                              applyHierarchyMetadataPatch(focusedNode.id, { title });
-                            }}
-                          />
-                        </label>
-                      </section>
-
-                      {(['Core Metadata', 'Arrangement & Scope', 'Access & Rights', 'Digital'] as const).map((section) => {
-                        const fields = CMS_FIELDS.filter((entry) => entry.section === section);
-                        return (
-                          <section key={section} className="cms-section">
-                            <h4 className="cms-section__title">{section}</h4>
-                            <div className="field-grid">
-                              {fields.map((field) => (
-                                <CmsMetadataInput
-                                  key={`${focusedNode.id}-${field.key}`}
-                                  fieldId={`${focusedNode.id}:meta:${field.key}`}
-                                  presence={catalogCursorByField[`${focusedNode.id}:meta:${field.key}`] ?? []}
-                                  label={field.label}
-                                  value={metadataByKey[field.key] ?? ''}
-                                  placeholder={field.placeholder}
-                                  multiline={field.multiline}
-                                  onCatalogCursor={publishCatalogCursor}
-                                  onCatalogBlur={clearCatalogCursor}
-                                  onChange={(nextValue) =>
-                                    applyHierarchyMetadataPatch(focusedNode.id, { [field.key]: nextValue })
-                                  }
-                                />
-                              ))}
-                            </div>
-                          </section>
-                        );
-                      })}
-                    </>
-                  ) : null}
-
-                  {focusedNode.level === 'item' ? (
-                    <>
-                      <section className="cms-section">
-                        <h4 className="cms-section__title">Linked Images</h4>
-                        {linkedImages.length > 0 ? (
-                          <div className="cms-image-grid">
-                            {linkedImages.map((link) => (
-                              <a
-                                key={link.fieldId}
-                                href={link.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="cms-image-card"
-                              >
-                                <img src={link.url} alt={link.label} loading="lazy" />
-                                <span>{link.label}</span>
-                              </a>
-                            ))}
-                          </div>
-                        ) : (
-                          <p className="cms-empty-note">
-                            No linked image URLs detected yet. Add `imageUrl` or `thumbnailUrl` item fields.
-                          </p>
-                        )}
-                      </section>
-
-                      <section className="cms-section">
-                        <h4 className="cms-section__title">Item Metadata</h4>
-                        <div className="cms-item-groups">
-                          {groupedItemFields.map((group) => (
-                            <article key={`${focusedNode.id}-${group.groupKey}`} className="cms-item-group">
-                              <h5>{group.groupLabel}</h5>
-                              <div className="field-grid">
-                                {group.fields.map((field) => (
-                                  <FieldInput
-                                    key={field.fieldId}
-                                    field={field}
-                                    fieldId={`${focusedNode.id}:item:${field.fieldId}`}
-                                    presence={catalogCursorByField[`${focusedNode.id}:item:${field.fieldId}`] ?? []}
-                                    onCatalogCursor={publishCatalogCursor}
-                                    onCatalogBlur={clearCatalogCursor}
-                                    onChange={(value) => {
-                                      updateActiveSeriesDoc((doc) =>
-                                        updateItemFieldValue(doc, focusedNode.id, field.fieldId, value),
-                                      );
-                                    }}
-                                  />
-                                ))}
-                              </div>
-                            </article>
-                          ))}
-                        </div>
-                      </section>
-                    </>
-                  ) : null}
-                </div>
-              ) : (
-                <p>Select a node in the hierarchy rail.</p>
-              )}
+              {catalogFormContent}
             </section>
           ) : (
             <section className="panel json-panel" aria-label="JSON view">
@@ -3357,140 +3449,85 @@ export function App({ currentUser, token, onLogout }: AppProps) {
             </section>
           ) : null}
         </main>
-        <aside className={historyPanelCollapsed ? 'workspace-context workspace-context--collapsed' : 'workspace-context'}>
+        <aside className={contextClassName}>
           <GuidedAgentSidebar onPromptSubmit={handleAgentPromptSubmit} thinking={agentThinking} />
-          <section
-            className={historyPanelCollapsed ? 'panel revisions-panel revisions-panel--collapsed' : 'panel revisions-panel'}
-            aria-label="Series revision history"
-          >
-            {historyPanelCollapsed ? (
-              <div className="workspace-context-actions">
+          {catalogSidebarVisible ? (
+            <section className="panel catalog-sidebar-panel" aria-label="Catalog sidebar">
+              <div className="catalog-sidebar-panel__header">
+                <div>
+                  <h3>Catalog</h3>
+                  <p>Focused metadata fields for the selected hierarchy node.</p>
+                </div>
                 <button
                   type="button"
-                  className="revisions-panel__collapsed-tab"
-                  onClick={() => setHistoryPanelCollapsed(false)}
-                  aria-label="Open revisions panel"
-                  title="Open revisions"
+                  className="catalog-sidebar-panel__close"
+                  onClick={() => setCatalogSidebarOpen(false)}
+                  aria-label="Close catalog sidebar"
+                  title="Close catalog"
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path
-                      d="M12 5.5a6.5 6.5 0 1 0 6.38 7.75 1 1 0 1 1 1.96.38A8.5 8.5 0 1 1 12 3.5h.25l-1.04-1.04a1 1 0 0 1 1.42-1.42l2.75 2.75a1 1 0 0 1 0 1.42l-2.75 2.75a1 1 0 1 1-1.42-1.42L12.25 5.5H12Z"
-                      fill="currentColor"
-                    />
-                    <path
-                      d="M12 7.75a1 1 0 0 1 1 1v2.62l1.88 1.13a1 1 0 0 1-1.03 1.72l-2.37-1.42a1 1 0 0 1-.48-.86V8.75a1 1 0 0 1 1-1Z"
-                      fill="currentColor"
-                    />
-                  </svg>
+                  ×
                 </button>
-
-                <div className="export-flyout">
-                  <button type="button" className="revisions-panel__collapsed-tab" aria-label="Export options" title="Export options">
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                      <path
-                        d="M12 3a1 1 0 0 1 1 1v9.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4 3.98a1 1 0 0 1-1.4 0l-4-3.98a1 1 0 1 1 1.4-1.42l2.3 2.3V4a1 1 0 0 1 1-1ZM5 18a1 1 0 0 1 1 1v1h12v-1a1 1 0 1 1 2 0v2a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1Z"
-                        fill="currentColor"
-                      />
-                    </svg>
-                  </button>
-
-                  <div className="export-flyout__panel" role="menu" aria-label="Export finding aid">
-                    <div className="export-flyout__group">
-                      <div className="export-flyout__item">Entire Collection</div>
-                      <div className="export-flyout__submenu">
-                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'word')}>
-                          DOCX
-                        </button>
-                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'ead')}>
-                          EAD XML
-                        </button>
-                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'html')}>
-                          HTML
-                        </button>
-                        <button type="button" onClick={() => void runCollectionExport(workspace.activeCollectionId, 'pdf')}>
-                          PDF
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="export-flyout__group">
-                      <div className="export-flyout__item">Active Series</div>
-                      <div className="export-flyout__submenu">
-                        <button type="button" onClick={() => void runSeriesExport('word')}>
-                          DOCX
-                        </button>
-                        <button type="button" onClick={() => void runSeriesExport('ead')}>
-                          EAD XML
-                        </button>
-                        <button type="button" onClick={() => void runSeriesExport('html')}>
-                          HTML
-                        </button>
-                        <button type="button" onClick={() => void runSeriesExport('pdf')}>
-                          PDF
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
               </div>
-            ) : (
-              <>
-                <div className="revisions-panel__header">
-                  <div className="revisions-panel__heading">
-                    <h3>Revisions</h3>
-                    <p>{activeSeriesRef?.title ?? historyDocName}</p>
-                  </div>
-                  <button
-                    type="button"
-                    className="revisions-panel__toggle"
-                    onClick={() => setHistoryPanelCollapsed(true)}
-                    aria-label="Collapse revisions panel"
-                    title="Collapse"
-                  >
-                    ▶
-                  </button>
+              <div className="catalog-sidebar-panel__body">{catalogFormContent}</div>
+            </section>
+          ) : null}
+          {revisionsPanelVisible ? (
+            <section className="panel revisions-panel" aria-label="Series revision history">
+              <div className="revisions-panel__header">
+                <div className="revisions-panel__heading">
+                  <h3>Revisions</h3>
+                  <p>{activeSeriesRef?.title ?? historyDocName}</p>
                 </div>
+                <button
+                  type="button"
+                  className="revisions-panel__toggle"
+                  onClick={() => setHistoryPanelCollapsed(true)}
+                  aria-label="Collapse revisions panel"
+                  title="Collapse"
+                >
+                  ▶
+                </button>
+              </div>
 
-                {historyLoading ? <p className="revisions-panel__status">Loading revisions…</p> : null}
-                {historyError ? <p className="revisions-panel__error">{historyError}</p> : null}
-                {!historyLoading && historySnapshots.length === 0 ? (
-                  <p className="revisions-panel__status">No revisions yet for this finding aid.</p>
-                ) : null}
-                {!historyLoading && historySnapshots.length > 0 ? (
-                  <ul className="revisions-panel__list">
-                    {historySnapshots.map((snapshot) => (
-                      <li key={snapshot.id} className="revisions-panel__item">
-                        <span className="revisions-panel__id">rev {snapshot.id}</span>
-                        {snapshot.revertedFromSnapshotId != null ? (
-                          <span className="revisions-panel__reverted-tag">reverted from rev {snapshot.revertedFromSnapshotId}</span>
-                        ) : null}
-                        <div className="revisions-panel__item-top">
-                          <strong className="revisions-panel__date">{new Date(snapshot.createdAt).toLocaleString()}</strong>
-                          <button
-                            type="button"
-                            className="revisions-panel__revert"
-                            disabled={historyRevertingSnapshotId != null}
-                            onClick={() => handleHistoryRevert(snapshot.id)}
-                          >
-                            {historyRevertingSnapshotId === snapshot.id ? 'Reverting…' : 'Revert'}
-                          </button>
-                        </div>
-                        <div className="revisions-panel__changes">{renderRevisionSummaryMarkdown(snapshot.summary ?? '', snapshot.diffStatus)}</div>
-                        {snapshot.diffStatus === 'failed' && snapshot.diffError ? (
-                          <small className="revisions-panel__diff-error">{snapshot.diffError}</small>
-                        ) : null}
-                        <small className="revisions-panel__meta">
-                          {snapshot.actorType ?? 'human'}
-                          {snapshot.actorId ? ` · ${snapshot.actorId}` : ''}
-                          {snapshot.source ? ` · ${snapshot.source}` : ''}
-                        </small>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </>
-            )}
-          </section>
+              {historyLoading ? <p className="revisions-panel__status">Loading revisions…</p> : null}
+              {historyError ? <p className="revisions-panel__error">{historyError}</p> : null}
+              {!historyLoading && historySnapshots.length === 0 ? (
+                <p className="revisions-panel__status">No revisions yet for this finding aid.</p>
+              ) : null}
+              {!historyLoading && historySnapshots.length > 0 ? (
+                <ul className="revisions-panel__list">
+                  {historySnapshots.map((snapshot) => (
+                    <li key={snapshot.id} className="revisions-panel__item">
+                      <span className="revisions-panel__id">rev {snapshot.id}</span>
+                      {snapshot.revertedFromSnapshotId != null ? (
+                        <span className="revisions-panel__reverted-tag">reverted from rev {snapshot.revertedFromSnapshotId}</span>
+                      ) : null}
+                      <div className="revisions-panel__item-top">
+                        <strong className="revisions-panel__date">{new Date(snapshot.createdAt).toLocaleString()}</strong>
+                        <button
+                          type="button"
+                          className="revisions-panel__revert"
+                          disabled={historyRevertingSnapshotId != null}
+                          onClick={() => handleHistoryRevert(snapshot.id)}
+                        >
+                          {historyRevertingSnapshotId === snapshot.id ? 'Reverting…' : 'Revert'}
+                        </button>
+                      </div>
+                      <div className="revisions-panel__changes">{renderRevisionSummaryMarkdown(snapshot.summary ?? '', snapshot.diffStatus)}</div>
+                      {snapshot.diffStatus === 'failed' && snapshot.diffError ? (
+                        <small className="revisions-panel__diff-error">{snapshot.diffError}</small>
+                      ) : null}
+                      <small className="revisions-panel__meta">
+                        {snapshot.actorType ?? 'human'}
+                        {snapshot.actorId ? ` · ${snapshot.actorId}` : ''}
+                        {snapshot.source ? ` · ${snapshot.source}` : ''}
+                      </small>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </section>
+          ) : null}
         </aside>
       </div>
     </div>

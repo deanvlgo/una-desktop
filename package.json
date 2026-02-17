@@ -16,10 +16,18 @@
     "seed:reset": "node scripts/reset-seed-data.mjs",
     "seed:rebuild": "node scripts/reset-seed-data.mjs"
   },
+  "dependencies": {
+    "@tiptap/core": "3.19.0",
+    "@tiptap/pm": "3.19.0"
+  },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "prettier": "^3.5.3",
     "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "@tiptap/core": "3.19.0",
+    "@tiptap/pm": "3.19.0"
   },
   "engines": {
     "node": ">=20"

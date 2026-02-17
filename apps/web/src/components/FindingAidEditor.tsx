@@ -1,15 +1,15 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { JSONContent, Mark, Node, mergeAttributes } from '@tiptap/core';
+import { type AnyExtension, JSONContent, Mark, Node, mergeAttributes } from '@tiptap/core';
 import Collaboration from '@tiptap/extension-collaboration';
-import CollaborationCursor from '@tiptap/extension-collaboration-cursor';
+import CollaborationCaret from '@tiptap/extension-collaboration-caret';
 import Heading from '@tiptap/extension-heading';
 import Link from '@tiptap/extension-link';
 import Underline from '@tiptap/extension-underline';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import type { HocuspocusProvider } from '@hocuspocus/provider';
-import PaginationExtension, { BodyNode, HeaderFooterNode, PageNode } from 'tiptap-extension-pagination';
+import { PAGE_SIZES, PaginationPlus } from 'tiptap-pagination-plus';
 
 import type { PMNode } from '../../../../src/contracts/types';
 import { formatHierarchyNodeHeading, getHierarchyLevelLabel } from '../lib/hierarchyLabels';
@@ -278,38 +278,30 @@ function readContentFromEditor(json: JSONContent): PMNode[] {
   }
 
   const nodes = json.content as unknown as PMNode[];
-  return flattenPaginationNodes(nodes);
+  return flattenPageLayoutNodes(nodes);
 }
 
-function flattenPaginationNodes(nodes: PMNode[]): PMNode[] {
+function flattenPageLayoutNodes(nodes: PMNode[]): PMNode[] {
   const flattened: PMNode[] = [];
-  const pageBodySignatures = new Set<string>();
+  const pageContentSignatures = new Set<string>();
 
   for (const node of nodes) {
-    if (node.type === 'page') {
-      const regions = Array.isArray(node.content) ? (node.content as PMNode[]) : [];
-      const bodyNode = regions.find((region) => region.type === 'body');
-      const bodyContent = Array.isArray(bodyNode?.content) ? (bodyNode.content as PMNode[]) : [];
-      const signature = JSON.stringify(bodyContent);
-      if (pageBodySignatures.has(signature)) {
-        continue;
-      }
-      pageBodySignatures.add(signature);
-      for (const child of bodyContent) {
-        flattened.push(structuredClone(child));
-      }
+    if (node.type === 'header-footer' || node.type === 'pageHeader' || node.type === 'pageFooter') {
       continue;
     }
 
-    if (node.type === 'body') {
-      const bodyContent = Array.isArray(node.content) ? (node.content as PMNode[]) : [];
-      for (const child of bodyContent) {
+    if (node.type === 'page' || node.type === 'body' || node.type === 'pageBody' || node.type === 'pageContent') {
+      const nested = flattenPageLayoutNodes(Array.isArray(node.content) ? (node.content as PMNode[]) : []);
+      const signature = JSON.stringify(nested);
+      if (signature.length > 2) {
+        if (pageContentSignatures.has(signature)) {
+          continue;
+        }
+        pageContentSignatures.add(signature);
+      }
+      for (const child of nested) {
         flattened.push(structuredClone(child));
       }
-      continue;
-    }
-
-    if (node.type === 'header-footer') {
       continue;
     }
 
@@ -602,8 +594,61 @@ export function FindingAidEditor({
   const syncedContentSignatureRef = useRef(contentSignature);
   const syncedHierarchySignatureRef = useRef(hierarchySignature);
   const syncedHierarchyHeadingsRef = useRef(hierarchyHeadings);
-  const hasHydratedCollabFromCanonicalRef = useRef(false);
+  const editorRef = useRef<ReturnType<typeof useEditor>>(null);
+  const pendingSetContentFrameRef = useRef<number | null>(null);
   const [sectionDepth, setSectionDepth] = useState(0);
+
+  const clearPendingSetContent = useCallback(() => {
+    if (pendingSetContentFrameRef.current != null) {
+      window.cancelAnimationFrame(pendingSetContentFrameRef.current);
+      pendingSetContentFrameRef.current = null;
+    }
+  }, []);
+
+  const applyContentWhenViewReady = useCallback(
+    (nextDoc: JSONContent) => {
+      clearPendingSetContent();
+      let attempts = 0;
+
+      const run = () => {
+        attempts += 1;
+
+        const activeEditor = editorRef.current;
+        if (!activeEditor || activeEditor.isDestroyed) {
+          return;
+        }
+
+        let isViewReady = false;
+        try {
+          const view = (activeEditor as unknown as { view?: { dom?: Element } }).view;
+          isViewReady = Boolean(view?.dom && (view.dom as Element).isConnected);
+          if (!isViewReady) {
+            throw new Error('EDITOR_VIEW_NOT_READY');
+          }
+
+          isApplyingRef.current = true;
+          activeEditor.commands.setContent(nextDoc, false);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (
+            (message.includes('editor view is not available') || message.includes('EDITOR_VIEW_NOT_READY')) &&
+            attempts < 24
+          ) {
+            pendingSetContentFrameRef.current = window.requestAnimationFrame(run);
+            return;
+          }
+          console.error('Failed to set editor content', error);
+        } finally {
+          isApplyingRef.current = false;
+        }
+      };
+
+      pendingSetContentFrameRef.current = window.requestAnimationFrame(run);
+    },
+    [clearPendingSetContent],
+  );
+
+  useEffect(() => clearPendingSetContent, [clearPendingSetContent]);
 
   useEffect(() => {
     hierarchyHeadingsRef.current = hierarchyHeadings;
@@ -622,7 +667,9 @@ export function FindingAidEditor({
       const base = [
         StarterKit.configure({
           heading: false,
-          history: collaborationEnabled ? false : undefined,
+          link: false,
+          underline: false,
+          undoRedo: collaborationEnabled ? false : undefined,
         }),
         FindingAidHeading.configure({ levels: [1, 2, 3] }),
         Underline,
@@ -631,22 +678,16 @@ export function FindingAidEditor({
         }),
         SuggestionInsertMark,
         SuggestionDeleteNode,
-        PaginationExtension.configure({
-          defaultPaperSize: 'Letter',
-          defaultMarginConfig: {
-            top: 14,
-            right: 14,
-            bottom: 14,
-            left: 14,
-          },
-          pageAmendmentOptions: {
-            enableHeader: false,
-            enableFooter: false,
-          },
-        }),
-        PageNode,
-        HeaderFooterNode,
-        BodyNode,
+        PaginationPlus.configure({
+          pageHeight: PAGE_SIZES.LETTER.pageHeight,
+          pageWidth: PAGE_SIZES.LETTER.pageWidth,
+          pageGap: 20,
+          pageBreakBackground: '#e8e8e6',
+          marginTop: PAGE_SIZES.LETTER.marginTop,
+          marginRight: PAGE_SIZES.LETTER.marginRight,
+          marginBottom: PAGE_SIZES.LETTER.marginBottom,
+          marginLeft: PAGE_SIZES.LETTER.marginLeft,
+        }) as unknown as AnyExtension,
       ];
 
       if (!collaborationEnabled || !collaborationProvider || !collaborationUser) {
@@ -659,10 +700,10 @@ export function FindingAidEditor({
           document: collaborationProvider.document,
           field: 'tiptap',
         }),
-        CollaborationCursor.configure({
+        CollaborationCaret.configure({
           provider: collaborationProvider,
           user: collaborationUser,
-          render: (user) => {
+          render: (user: { name?: string; avatar?: string }) => {
             const caret = document.createElement('span');
             caret.classList.add('collaboration-cursor__caret');
 
@@ -744,6 +785,10 @@ export function FindingAidEditor({
   }, [collaborationEnabled, collaborationProvider, collaborationUser?.avatar, collaborationUser?.name, collaborationUser?.color]);
 
   useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
+
+  useEffect(() => {
     if (!editor) {
       return;
     }
@@ -752,9 +797,7 @@ export function FindingAidEditor({
       collaborationEnabled && editor.isEmpty && (content.length > 0 || hierarchyHeadings.length > 0);
 
     if (shouldSeedEmptyCollabDoc) {
-      isApplyingRef.current = true;
-      editor.commands.setContent(contentToDoc(content, hierarchyHeadings), false);
-      isApplyingRef.current = false;
+      applyContentWhenViewReady(contentToDoc(content, hierarchyHeadings));
 
       syncedContentSignatureRef.current = contentSignature;
       syncedHierarchySignatureRef.current = hierarchySignature;
@@ -774,17 +817,14 @@ export function FindingAidEditor({
         const editorContentSignature = JSON.stringify(editorContent);
         const shouldReconcileFromCanonical =
           !editor.isFocused &&
-          (!hasHydratedCollabFromCanonicalRef.current || editorContentSignature !== contentSignature);
+          editorContentSignature !== contentSignature;
 
         if (shouldReconcileFromCanonical) {
-          isApplyingRef.current = true;
-          editor.commands.setContent(contentToDoc(content, hierarchyHeadings), false);
-          isApplyingRef.current = false;
+          applyContentWhenViewReady(contentToDoc(content, hierarchyHeadings));
 
           syncedContentSignatureRef.current = contentSignature;
           syncedHierarchySignatureRef.current = hierarchySignature;
           syncedHierarchyHeadingsRef.current = hierarchyHeadings;
-          hasHydratedCollabFromCanonicalRef.current = true;
         }
       }
       return;
@@ -815,17 +855,12 @@ export function FindingAidEditor({
       }
     }
 
-    isApplyingRef.current = true;
-    editor.commands.setContent(contentToDoc(content, hierarchyHeadings), false);
-    isApplyingRef.current = false;
+    applyContentWhenViewReady(contentToDoc(content, hierarchyHeadings));
 
     syncedContentSignatureRef.current = contentSignature;
     syncedHierarchySignatureRef.current = hierarchySignature;
     syncedHierarchyHeadingsRef.current = hierarchyHeadings;
-    if (collaborationEnabled) {
-      hasHydratedCollabFromCanonicalRef.current = true;
-    }
-  }, [collaborationEnabled, content, contentSignature, editor, hierarchyHeadings, hierarchySignature]);
+  }, [applyContentWhenViewReady, collaborationEnabled, content, contentSignature, editor, hierarchyHeadings, hierarchySignature]);
 
   useEffect(() => {
     if (!editor || !focusedHierarchyId) {
@@ -1107,7 +1142,7 @@ export function FindingAidEditor({
       </div>
 
       <div className="finding-aid__editor-shell">
-        <div className="finding-aid__editor-page">
+        <div className="finding-aid__editor-page finding-aid__editor-page--paginated">
           {editor ? <EditorContent editor={editor} /> : <div className="finding-aid__loading">Loading editor...</div>}
         </div>
       </div>
