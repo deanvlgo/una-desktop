@@ -469,11 +469,25 @@ function applyHierarchyHeadingTitlesToEditor(
 
   if (changed) {
     const mappedSelection = editor.state.selection.map(tr.doc, tr.mapping);
-    tr = tr.setSelection(mappedSelection);
+    if (mappedSelection.$anchor.parent.inlineContent && mappedSelection.$head.parent.inlineContent) {
+      tr = tr.setSelection(mappedSelection);
+    }
     editor.view.dispatch(tr);
   }
 
   return changed;
+}
+
+function findFirstInlinePosition(doc: NonNullable<ReturnType<typeof useEditor>>['state']['doc']): number | null {
+  let inlinePos: number | null = null;
+  doc.descendants((node, pos) => {
+    if (node.isTextblock && node.inlineContent) {
+      inlinePos = pos + 1;
+      return false;
+    }
+    return true;
+  });
+  return inlinePos;
 }
 
 function removeHeadingAtSelection(editor: ReturnType<typeof useEditor>): boolean {
@@ -842,7 +856,18 @@ export function FindingAidEditor({
       if (headingPos != null) {
         lastHandledFocusRequestKeyRef.current = focusRequestKey;
         lastReportedHierarchyIdRef.current = focusedHierarchyId;
-        editor.chain().focus(headingPos + 1).scrollIntoView().run();
+        const targetPos = headingPos + 1;
+        const maxPos = Math.max(1, editor.state.doc.content.size);
+        const safePos = Math.max(1, Math.min(targetPos, maxPos));
+        const resolved = editor.state.doc.resolve(safePos);
+        if (resolved.parent.inlineContent) {
+          editor.chain().focus(safePos).scrollIntoView().run();
+        } else {
+          const fallbackPos = findFirstInlinePosition(editor.state.doc);
+          if (fallbackPos != null) {
+            editor.chain().focus(fallbackPos).scrollIntoView().run();
+          }
+        }
         return;
       }
 
