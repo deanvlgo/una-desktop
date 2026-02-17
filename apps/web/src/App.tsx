@@ -21,6 +21,7 @@ import manifestFixture from '../../../src/fixtures/manifest.doc.json';
 import historiqLogo from './assets/historiq-logo.svg';
 import { FindingAidEditor, buildFindingAidDocJson, type HierarchyHeading } from './components/FindingAidEditor';
 import { FindingAidHierarchy } from './components/FindingAidHierarchy';
+import { GuidedAgentSidebar } from './components/GuidedAgentSidebar';
 import {
   addHierarchyChildNode,
   buildHierarchyTree,
@@ -48,7 +49,7 @@ import {
 } from './lib/series';
 import { formatHierarchyNodeHeading, getHierarchyLevelLabel, toRomanNumeral } from './lib/hierarchyLabels';
 import { userInitials } from './lib/user';
-import { CollabClient, buildCollabSeeds } from './lib/collab';
+import { CollabClient } from './lib/collab';
 import type { AuthenticatedUser } from './types/auth';
 import {
   fetchCollectionSeriesRefs,
@@ -65,16 +66,16 @@ import {
 } from './lib/canonicalIndex';
 import type { OrgCollectionIndexEntry } from './lib/canonicalRooms';
 import {
-  fetchSharedCollectionSeriesRefs,
-  fetchSharedCollectionEntries,
-  patchSharedCollectionEntry,
-  sharedCollectionsApiEnabled,
-} from './lib/sharedCollectionsApi';
-import {
   exportCollectionFindingAid,
   exportSeriesFindingAid,
   type ExportFormat,
 } from './lib/findingAidExport';
+import { apiFetch } from './lib/api';
+import {
+  applyAssistantHierarchyToSeriesDoc,
+  buildAssistantHierarchyFromSeriesDoc,
+  buildAssistantOriginalTranscript,
+} from './lib/agentHierarchy';
 
 type ManifestSeriesRef = {
   seriesId: string;
@@ -230,6 +231,14 @@ function displayNameForUser(user: AuthenticatedUser): string {
 
 const DEFAULT_INSTITUTION_NAME = 'Great Lakes Railroad Historical Society';
 
+function createSafeId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+
 type AppProps = {
   currentUser: AuthenticatedUser;
   token: string;
@@ -264,6 +273,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const [historyRevertingSnapshotId, setHistoryRevertingSnapshotId] = useState<number | null>(null);
   const [showNoSeriesMessage, setShowNoSeriesMessage] = useState(false);
   const [jsonViewDebugMode, setJsonViewDebugMode] = useState(false);
+  const [agentThinking, setAgentThinking] = useState(false);
   const [logVersion, setLogVersion] = useState(0);
   const [presenceByNodeId, setPresenceByNodeId] = useState<PresenceMap>({});
   const [collectionPresence, setCollectionPresence] = useState<Record<string, number>>({});
@@ -275,7 +285,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
   const [actionLogStore] = useState(() => new InMemoryAgentActionLog());
   const collabClientRef = useRef<CollabClient | null>(null);
-  const collabInstanceIdRef = useRef<string>(`desktop-${crypto.randomUUID()}`);
+  const collabInstanceIdRef = useRef<string>(`desktop-${createSafeId()}`);
   const lastFocusedSeriesDocRef = useRef<string | null>(null);
   const presenceSyncRafRef = useRef<number | null>(null);
   const manifestSeriesRecoveryAttemptedRef = useRef<Set<string>>(new Set());
@@ -294,12 +304,6 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     }
     return defaultCollabEnabled();
   }, []);
-  const sharedCollectionsEnabled = useMemo(() => {
-    if (typeof window === 'undefined') {
-      return false;
-    }
-    return sharedCollectionsApiEnabled();
-  }, []);
   const orgId = currentUser.organization_id ?? undefined;
 
   useEffect(() => {
@@ -308,42 +312,13 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
   useEffect(() => {
     manifestSeriesRecoveryAttemptedRef.current.clear();
-  }, [collabEnabled, orgId, sharedCollectionsEnabled, token]);
+  }, [collabEnabled, orgId, token]);
 
   useEffect(() => {
     if (!orgId || !token) {
       setCanonicalEntriesById({});
       canonicalMapRef.current = null;
       return;
-    }
-
-    if (sharedCollectionsEnabled) {
-      canonicalMapRef.current = null;
-      let isDisposed = false;
-
-      const refreshEntries = async () => {
-        try {
-          const next = await fetchSharedCollectionEntries();
-          if (isDisposed) {
-            return;
-          }
-          setCanonicalEntriesById(next);
-        } catch (error) {
-          if (!isDisposed) {
-            console.error('Failed loading shared collection entries', error);
-          }
-        }
-      };
-
-      void refreshEntries();
-      const intervalId = window.setInterval(() => {
-        void refreshEntries();
-      }, 20000);
-
-      return () => {
-        isDisposed = true;
-        window.clearInterval(intervalId);
-      };
     }
 
     const connection = connectOrgIndex(orgId, token);
@@ -373,7 +348,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       canonicalMapRef.current = null;
       disconnectOrgIndex(connection);
     };
-  }, [orgId, sharedCollectionsEnabled, token]);
+  }, [orgId, token]);
 
   const activeManifestDoc = useMemo(
     () => workspace.manifestsByCollectionId[workspace.activeCollectionId] ?? null,
@@ -385,14 +360,6 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   useEffect(() => {
     workspaceRef.current = workspace;
   }, [workspace]);
-
-  const manifestDocNameByCollectionId = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const collectionId of workspace.collectionOrder) {
-      map[collectionId] = orgId ? `collection:${orgId}:${collectionId}` : manifestDocName(collectionId);
-    }
-    return map;
-  }, [orgId, workspace.collectionOrder]);
 
   const seriesRefs = useMemo(() => {
     if (!activeManifestDoc) {
@@ -471,6 +438,18 @@ export function App({ currentUser, token, onLogout }: AppProps) {
             return;
           }
           console.error('Failed refreshing history snapshots', error);
+          setHistoryError('History service is temporarily unavailable.');
+          setHistorySnapshots((previous) =>
+            previous.map((snapshot) =>
+              snapshot.diffStatus === 'pending' || snapshot.diffStatus === 'processing'
+                ? {
+                    ...snapshot,
+                    diffStatus: 'failed',
+                    diffError: snapshot.diffError ?? 'History refresh failed.',
+                  }
+                : snapshot,
+            ),
+          );
         });
     }, 2200);
 
@@ -574,6 +553,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         const root = manifest.content[0];
         const canonicalEntry = canonicalEntriesById[collectionId];
         const refs = readManifestSeriesRefs(manifest);
+        const seriesRefsUnknown = refs.length === 0 && isPlaceholderManifestDoc(manifest);
         const activeCount = refs.reduce((sum, ref) => sum + (collectionPresence[ref.docName] ?? 0), 0);
         return {
           collectionId,
@@ -581,6 +561,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
           description: readCollectionDescription(manifest),
           dates: String(root.attrs?.dates ?? ''),
           seriesRefs: refs,
+          seriesRefsUnknown,
           activeCount,
           workflowStatus: canonicalEntry?.workflowStatus ?? 'describe_started',
           submittedAt: canonicalEntry?.submittedAt ?? null,
@@ -594,7 +575,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         if (!showArchivedCollections && entry.isArchived) {
           return false;
         }
-        if (!showCollectionsWithoutSeries && entry.seriesRefs.length === 0) {
+        if (!showCollectionsWithoutSeries && entry.seriesRefs.length === 0 && !entry.seriesRefsUnknown) {
           return false;
         }
         return true;
@@ -730,7 +711,10 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
   const activeSeriesDoc = useMemo(() => {
     if (!activeSeriesRef) {
-      return null;
+      if (!activeManifestDoc) {
+        return null;
+      }
+      return createPlaceholderSeriesDoc('series-pending', 'Loading series…');
     }
     const loaded = workspace.seriesDocs[activeSeriesRef.docName];
     if (loaded) {
@@ -740,7 +724,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       activeSeriesRef.seriesId || extractSeriesIdFromDocName(activeSeriesRef.docName),
       activeSeriesRef.title,
     );
-  }, [activeSeriesRef, workspace.seriesDocs]);
+  }, [activeManifestDoc, activeSeriesRef, workspace.seriesDocs]);
   const activeSeriesProvider = collabEnabled
     ? activeSeriesRef
       ? collabClientRef.current?.getProvider(activeSeriesRef.docName) ?? null
@@ -1118,48 +1102,49 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     collabClientRef.current = collab;
 
     const snapshot = workspaceRef.current;
-    const seedMap: Record<string, string> = {};
-    for (const collectionId of snapshot.collectionOrder) {
-      seedMap[collectionId] = orgId ? `collection:${orgId}:${collectionId}` : manifestDocName(collectionId);
-    }
+    const startupCollectionId = snapshot.activeCollectionId || snapshot.collectionOrder[0] || '';
+    const startupManifest = startupCollectionId
+      ? snapshot.manifestsByCollectionId[startupCollectionId]
+      : null;
 
-    const seeds = buildCollabSeeds({
-      manifestsByCollectionId: snapshot.manifestsByCollectionId,
-      // When org scoping is available, canonical series rooms are connected below.
-      // Avoid connecting legacy non-org room names to prevent split edit streams.
-      seriesDocs: orgId ? {} : snapshot.seriesDocs,
-      manifestDocNameByCollectionId: seedMap,
-    });
+    const startupSeeds: Array<{ docName: string; initialValue: CollectionManifestDoc | SeriesDoc }> = [];
 
-    const canonicalSeriesSeeds = buildCanonicalSeriesSeeds({
-      manifestsByCollectionId: snapshot.manifestsByCollectionId,
-      seriesDocs: snapshot.seriesDocs,
-      orgId,
-    });
-    const allSeeds = [...seeds];
-    const connectedDocNames = new Set(allSeeds.map((seed) => seed.docName));
-    for (const seed of canonicalSeriesSeeds) {
-      if (connectedDocNames.has(seed.docName)) {
-        continue;
-      }
-      allSeeds.push(seed);
-      connectedDocNames.add(seed.docName);
-    }
-    for (const [collectionId, manifest] of Object.entries(snapshot.manifestsByCollectionId)) {
-      const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
-      for (const docName of manifestRoomCandidates({ collectionId, orgId, sourceObjectId })) {
-        if (connectedDocNames.has(docName)) {
-          continue;
-        }
-        allSeeds.push({
+    if (startupManifest && startupCollectionId) {
+      const sourceObjectId = canonicalEntriesRef.current[startupCollectionId]?.sourceObjectId;
+      for (const docName of manifestRoomCandidates({ collectionId: startupCollectionId, orgId, sourceObjectId })) {
+        startupSeeds.push({
           docName,
-          initialValue: structuredClone(manifest),
+          initialValue: structuredClone(startupManifest),
         });
-        connectedDocNames.add(docName);
+      }
+
+      const refs = readManifestSeriesRefs(startupManifest);
+      const startupSeriesDocName = snapshot.activeSeriesDocName || refs[0]?.docName || '';
+      if (startupSeriesDocName) {
+        const activeRef = refs.find((ref) => ref.docName === startupSeriesDocName) ?? refs[0] ?? null;
+        const fallbackLegacyDocName =
+          activeRef != null
+            ? seriesDocName(
+                startupCollectionId,
+                activeRef.seriesId || extractSeriesIdFromDocName(startupSeriesDocName),
+              )
+            : '';
+        const seriesDoc =
+          snapshot.seriesDocs[startupSeriesDocName] ??
+          (fallbackLegacyDocName ? snapshot.seriesDocs[fallbackLegacyDocName] : undefined) ??
+          createPlaceholderSeriesDoc(
+            activeRef?.seriesId || extractSeriesIdFromDocName(startupSeriesDocName),
+            activeRef?.title ?? 'Untitled Series',
+          );
+
+        startupSeeds.push({
+          docName: startupSeriesDocName,
+          initialValue: structuredClone(seriesDoc),
+        });
       }
     }
 
-    for (const seed of allSeeds) {
+    for (const seed of startupSeeds) {
       collab.connectRoom(seed);
     }
 
@@ -1182,132 +1167,135 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       return;
     }
 
-    const seeds = buildCollabSeeds({
-      manifestsByCollectionId: workspace.manifestsByCollectionId,
-      // When org scoping is available, canonical series rooms are connected below.
-      // Avoid connecting legacy non-org room names to prevent split edit streams.
-      seriesDocs: orgId ? {} : workspace.seriesDocs,
-      manifestDocNameByCollectionId,
-    });
-
-    const canonicalSeriesSeeds = buildCanonicalSeriesSeeds({
-      manifestsByCollectionId: workspace.manifestsByCollectionId,
-      seriesDocs: workspace.seriesDocs,
-      orgId,
-    });
-    const allSeeds = [...seeds];
-    const connectedDocNames = new Set(allSeeds.map((seed) => seed.docName));
-    for (const seed of canonicalSeriesSeeds) {
-      if (connectedDocNames.has(seed.docName)) {
-        continue;
-      }
-      allSeeds.push(seed);
-      connectedDocNames.add(seed.docName);
-    }
-    for (const [collectionId, manifest] of Object.entries(workspace.manifestsByCollectionId)) {
-      const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
-      for (const docName of manifestRoomCandidates({ collectionId, orgId, sourceObjectId })) {
-        if (connectedDocNames.has(docName)) {
-          continue;
-        }
-        allSeeds.push({
-          docName,
-          initialValue: structuredClone(manifest),
-        });
-        connectedDocNames.add(docName);
-      }
+    const collectionId = workspace.activeCollectionId;
+    if (!collectionId) {
+      return;
     }
 
-    for (const seed of allSeeds) {
-      collab.connectRoom(seed);
+    const manifest = workspace.manifestsByCollectionId[collectionId];
+    if (!manifest) {
+      return;
     }
-  }, [collabEnabled, manifestDocNameByCollectionId, orgId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
+
+    const scopedSeeds: Array<{ docName: string; initialValue: CollectionManifestDoc | SeriesDoc }> = [];
+    const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
+    for (const docName of manifestRoomCandidates({ collectionId, orgId, sourceObjectId })) {
+      scopedSeeds.push({
+        docName,
+        initialValue: structuredClone(manifest),
+      });
+    }
+
+    const refs = readManifestSeriesRefs(manifest);
+    const activeDocName = workspace.activeSeriesDocName || refs[0]?.docName || '';
+    if (activeDocName) {
+      const activeRef = refs.find((ref) => ref.docName === activeDocName) ?? refs[0] ?? null;
+      const fallbackLegacyDocName =
+        activeRef != null
+          ? seriesDocName(collectionId, activeRef.seriesId || extractSeriesIdFromDocName(activeDocName))
+          : '';
+      const sourceDoc =
+        workspace.seriesDocs[activeDocName] ??
+        (fallbackLegacyDocName ? workspace.seriesDocs[fallbackLegacyDocName] : undefined) ??
+        createPlaceholderSeriesDoc(
+          activeRef?.seriesId || extractSeriesIdFromDocName(activeDocName),
+          activeRef?.title ?? 'Untitled Series',
+        );
+
+      scopedSeeds.push({
+        docName: activeDocName,
+        initialValue: structuredClone(sourceDoc),
+      });
+    }
+
+    collab.syncRooms(scopedSeeds);
+  }, [
+    collabEnabled,
+    orgId,
+    workspace.activeCollectionId,
+    workspace.activeSeriesDocName,
+    workspace.manifestsByCollectionId,
+    workspace.seriesDocs,
+  ]);
 
   useEffect(() => {
     if (!collabEnabled || !token) {
       return;
     }
 
-    const pendingCollectionIds: string[] = [];
-    for (const collectionId of workspace.collectionOrder) {
-      const manifest = workspace.manifestsByCollectionId[collectionId];
-      if (!manifest) {
-        continue;
-      }
-      if (readManifestSeriesRefs(manifest).length > 0) {
-        continue;
-      }
-      if (manifestSeriesRecoveryAttemptedRef.current.has(collectionId)) {
-        continue;
-      }
-      manifestSeriesRecoveryAttemptedRef.current.add(collectionId);
-      pendingCollectionIds.push(collectionId);
-    }
-
-    if (pendingCollectionIds.length === 0) {
+    const collectionId = workspace.activeCollectionId;
+    if (!collectionId) {
       return;
     }
 
-    let cancelled = false;
-    for (const collectionId of pendingCollectionIds) {
-      const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
-      const loadSeriesRefs = sharedCollectionsEnabled
-        ? fetchSharedCollectionSeriesRefs({ collectionId, sourceObjectId })
-        : fetchCollectionSeriesRefs({ token, collectionId, sourceObjectId });
-      void loadSeriesRefs
-        .then((refs) => {
-          if (cancelled || refs.length === 0) {
-            return;
-          }
-          const recoveredRefs = refs
-            .map((ref) => ({
-              seriesId: String(ref.seriesId ?? '').trim(),
-              title: String(ref.title ?? 'Untitled Series'),
-              order: Number.isFinite(ref.order) && ref.order > 0 ? Math.floor(ref.order) : 0,
-              docName: String(ref.docName ?? '').trim(),
-            }))
-            .filter((ref) => ref.docName.length > 0);
-          if (recoveredRefs.length === 0) {
-            return;
-          }
-
-          setWorkspace((previous) => {
-            const manifest = previous.manifestsByCollectionId[collectionId];
-            if (!manifest) {
-              return previous;
-            }
-            if (readManifestSeriesRefs(manifest).length > 0) {
-              return previous;
-            }
-
-            const nextManifest = withManifestSeriesRefs(manifest, recoveredRefs);
-            const nextManifests = {
-              ...previous.manifestsByCollectionId,
-              [collectionId]: nextManifest,
-            };
-
-            const nextActiveSeriesDocName =
-              previous.activeCollectionId === collectionId && !previous.activeSeriesDocName
-                ? recoveredRefs[0]?.docName ?? previous.activeSeriesDocName
-                : previous.activeSeriesDocName;
-
-            return {
-              ...previous,
-              manifestsByCollectionId: nextManifests,
-              activeSeriesDocName: nextActiveSeriesDocName,
-            };
-          });
-        })
-        .catch((error) => {
-          manifestSeriesRecoveryAttemptedRef.current.delete(collectionId);
-          console.error(`Failed recovering series refs for collection ${collectionId}`, error);
-        });
+    const manifest = workspace.manifestsByCollectionId[collectionId];
+    if (!manifest) {
+      return;
     }
+    if (readManifestSeriesRefs(manifest).length > 0) {
+      return;
+    }
+    if (manifestSeriesRecoveryAttemptedRef.current.has(collectionId)) {
+      return;
+    }
+    manifestSeriesRecoveryAttemptedRef.current.add(collectionId);
+
+    let cancelled = false;
+    const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
+    const loadSeriesRefs = fetchCollectionSeriesRefs({ token, collectionId, sourceObjectId });
+    void loadSeriesRefs
+      .then((refs) => {
+        if (cancelled || refs.length === 0) {
+          return;
+        }
+        const recoveredRefs = refs
+          .map((ref) => ({
+            seriesId: String(ref.seriesId ?? '').trim(),
+            title: String(ref.title ?? 'Untitled Series'),
+            order: Number.isFinite(ref.order) && ref.order > 0 ? Math.floor(ref.order) : 0,
+            docName: String(ref.docName ?? '').trim(),
+          }))
+          .filter((ref) => ref.docName.length > 0);
+        if (recoveredRefs.length === 0) {
+          return;
+        }
+
+        setWorkspace((previous) => {
+          const nextManifestTarget = previous.manifestsByCollectionId[collectionId];
+          if (!nextManifestTarget) {
+            return previous;
+          }
+          if (readManifestSeriesRefs(nextManifestTarget).length > 0) {
+            return previous;
+          }
+
+          const nextManifest = withManifestSeriesRefs(nextManifestTarget, recoveredRefs);
+          const nextManifests = {
+            ...previous.manifestsByCollectionId,
+            [collectionId]: nextManifest,
+          };
+
+          const nextActiveSeriesDocName =
+            previous.activeCollectionId === collectionId && !previous.activeSeriesDocName
+              ? recoveredRefs[0]?.docName ?? previous.activeSeriesDocName
+              : previous.activeSeriesDocName;
+
+          return {
+            ...previous,
+            manifestsByCollectionId: nextManifests,
+            activeSeriesDocName: nextActiveSeriesDocName,
+          };
+        });
+      })
+      .catch((error) => {
+        manifestSeriesRecoveryAttemptedRef.current.delete(collectionId);
+        console.error(`Failed recovering series refs for collection ${collectionId}`, error);
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [collabEnabled, sharedCollectionsEnabled, token, workspace.collectionOrder, workspace.manifestsByCollectionId]);
+  }, [collabEnabled, token, workspace.activeCollectionId, workspace.manifestsByCollectionId]);
 
   useEffect(() => {
     if (!collabEnabled) {
@@ -1319,44 +1307,58 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       return;
     }
 
-    const seriesDocsToPublish = new Map<string, SeriesDoc>();
+    const collectionId = workspace.activeCollectionId;
+    if (!collectionId) {
+      return;
+    }
 
-    for (const [collectionId, manifest] of Object.entries(workspace.manifestsByCollectionId)) {
-      const roomName = manifestDocNameByCollectionId[collectionId];
-      if (!roomName) {
-        continue;
-      }
+    const manifest = workspace.manifestsByCollectionId[collectionId];
+    if (!manifest) {
+      return;
+    }
 
-      const normalizedManifest = normalizeManifestSeriesRefsForOrg(manifest, collectionId, orgId).manifest;
-      if (!isPlaceholderManifestDoc(normalizedManifest)) {
-        collab.publishDoc(roomName, normalizedManifest);
-      }
-
-      for (const ref of readManifestSeriesRefs(normalizedManifest)) {
-        if (!ref.docName) {
-          continue;
-        }
-
-        const fallbackLegacyDocName = seriesDocName(
-          collectionId,
-          ref.seriesId || extractSeriesIdFromDocName(ref.docName),
-        );
-        const sourceDoc =
-          workspace.seriesDocs[ref.docName] ??
-          workspace.seriesDocs[fallbackLegacyDocName] ??
-          createPlaceholderSeriesDoc(ref.seriesId || extractSeriesIdFromDocName(ref.docName), ref.title);
-
-        seriesDocsToPublish.set(ref.docName, sourceDoc);
+    const normalizedManifest = normalizeManifestSeriesRefsForOrg(manifest, collectionId, orgId).manifest;
+    if (!isPlaceholderManifestDoc(normalizedManifest)) {
+      const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
+      for (const docName of manifestRoomCandidates({ collectionId, orgId, sourceObjectId })) {
+        collab.publishDoc(docName, normalizedManifest);
       }
     }
 
-    for (const [docName, seriesDoc] of seriesDocsToPublish.entries()) {
-      if (isPlaceholderSeriesDoc(seriesDoc)) {
-        continue;
-      }
-      collab.publishDoc(docName, seriesDoc);
+    const refs = readManifestSeriesRefs(normalizedManifest);
+    const activeDocName = workspace.activeSeriesDocName || refs[0]?.docName || '';
+    if (!activeDocName) {
+      return;
     }
-  }, [collabEnabled, manifestDocNameByCollectionId, orgId, workspace.manifestsByCollectionId, workspace.seriesDocs]);
+
+    const activeRef = refs.find((ref) => ref.docName === activeDocName) ?? refs[0] ?? null;
+    const fallbackLegacyDocName =
+      activeRef != null
+        ? seriesDocName(collectionId, activeRef.seriesId || extractSeriesIdFromDocName(activeDocName))
+        : '';
+    const sourceDoc =
+      workspace.seriesDocs[activeDocName] ??
+      (fallbackLegacyDocName ? workspace.seriesDocs[fallbackLegacyDocName] : undefined) ??
+      (activeRef
+        ? createPlaceholderSeriesDoc(
+            activeRef.seriesId || extractSeriesIdFromDocName(activeDocName),
+            activeRef.title,
+          )
+        : null);
+
+    if (!sourceDoc || isPlaceholderSeriesDoc(sourceDoc)) {
+      return;
+    }
+
+    collab.publishDoc(activeDocName, sourceDoc);
+  }, [
+    collabEnabled,
+    orgId,
+    workspace.activeCollectionId,
+    workspace.activeSeriesDocName,
+    workspace.manifestsByCollectionId,
+    workspace.seriesDocs,
+  ]);
 
   useEffect(() => {
     if (!currentFocusState) {
@@ -1536,6 +1538,23 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     });
   }, []);
 
+  const updateSeriesDocByName = useCallback((docName: string, updater: (doc: SeriesDoc) => SeriesDoc) => {
+    setWorkspace((previous) => {
+      const current = previous.seriesDocs[docName];
+      if (!current) {
+        return previous;
+      }
+
+      return {
+        ...previous,
+        seriesDocs: {
+          ...previous.seriesDocs,
+          [docName]: updater(current),
+        },
+      };
+    });
+  }, []);
+
   const updateCollectionManifest = useCallback(
     (collectionId: string, updater: (manifest: CollectionManifestDoc) => CollectionManifestDoc) => {
       setWorkspace((previous) => {
@@ -1581,28 +1600,6 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         entryType: existing?.entryType,
       });
 
-      if (sharedCollectionsEnabled) {
-        setCanonicalEntriesById((previous) => ({
-          ...previous,
-          [collectionId]: mergePatch(previous[collectionId]),
-        }));
-
-        void patchSharedCollectionEntry({ collectionId, patch })
-          .then((updated) => {
-            if (!updated) {
-              return;
-            }
-            setCanonicalEntriesById((previous) => ({
-              ...previous,
-              [collectionId]: updated,
-            }));
-          })
-          .catch((error) => {
-            console.error(`Failed syncing collection metadata for ${collectionId}`, error);
-          });
-        return;
-      }
-
       const map = canonicalMapRef.current;
       if (!map) {
         return;
@@ -1611,7 +1608,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       const existing = getOrgIndexEntry(map, collectionId);
       upsertOrgIndexEntry(map, mergePatch(existing ?? undefined));
     },
-    [currentUser.id, sharedCollectionsEnabled],
+    [currentUser.id],
   );
 
   const renameCollectionTitle = useCallback(
@@ -1910,6 +1907,105 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     [actionLogStore],
   );
 
+  const handleAgentPromptSubmit = useCallback(
+    async (payload: { type: 'text' | 'audio'; text: string; transcriptSnapshot?: string }) => {
+      const prompt = payload.text.trim();
+      if (!prompt) {
+        return;
+      }
+
+      const activeDocName = workspace.activeSeriesDocName;
+      const activeDoc = workspace.seriesDocs[activeDocName];
+      const summaryPrefix = payload.type === 'audio' ? 'VOICE PROMPT' : 'TEXT PROMPT';
+      const summary = `${summaryPrefix} ${prompt.slice(0, 120)}`;
+      const opId = createSafeId();
+
+      if (!activeDoc || !activeDocName) {
+        appendActionLog({
+          opId,
+          userId: localUser.id,
+          createdAt: Date.now(),
+          docNames: [activeDocName],
+          suggestionIds: [],
+          promptSummary: summary,
+          result: 'failed',
+          errorMessage: 'No active series document available.',
+        });
+        return;
+      }
+
+      setAgentThinking(true);
+
+      try {
+        const response = await apiFetch('/api/voice/update-hierarchy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            original_transcript: buildAssistantOriginalTranscript(activeDoc),
+            current_hierarchy: buildAssistantHierarchyFromSeriesDoc(activeDoc),
+            update_instructions: prompt,
+          }),
+        });
+
+        let responseBody: Record<string, unknown> | null = null;
+        try {
+          responseBody = (await response.json()) as Record<string, unknown>;
+        } catch {
+          responseBody = null;
+        }
+
+        if (!response.ok) {
+          const detail =
+            typeof responseBody?.detail === 'string'
+              ? responseBody.detail
+              : responseBody?.detail
+                ? JSON.stringify(responseBody.detail)
+                : '';
+          throw new Error(
+            detail
+              ? `Assistant update failed (${response.status}): ${detail}`
+              : `Assistant update failed (${response.status}).`,
+          );
+        }
+
+        if (!responseBody || responseBody.success !== true || !Array.isArray(responseBody.proposed_hierarchy)) {
+          throw new Error('Assistant update returned an invalid hierarchy payload.');
+        }
+
+        updateSeriesDocByName(activeDocName, (doc) =>
+          syncSeriesBodyWithHierarchy(applyAssistantHierarchyToSeriesDoc(doc, responseBody?.proposed_hierarchy)),
+        );
+
+        appendActionLog({
+          opId,
+          userId: localUser.id,
+          createdAt: Date.now(),
+          docNames: [activeDocName],
+          suggestionIds: [],
+          promptSummary: summary,
+          result: 'ok',
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Assistant update failed.';
+        console.error('Assistant prompt failed', error);
+        appendActionLog({
+          opId,
+          userId: localUser.id,
+          createdAt: Date.now(),
+          docNames: [activeDocName],
+          suggestionIds: [],
+          promptSummary: summary,
+          result: 'failed',
+          errorMessage: message,
+        });
+      } finally {
+        setAgentThinking(false);
+      }
+
+    },
+    [appendActionLog, localUser.id, updateSeriesDocByName, workspace.activeSeriesDocName, workspace.seriesDocs],
+  );
+
   const applyManifestSeriesMove = useCallback(
     (draggedDocName: string, targetDocName: string, placement: 'before' | 'after') => {
       if (!activeManifestDoc) {
@@ -1948,7 +2044,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       });
 
       appendActionLog({
-        opId: crypto.randomUUID(),
+        opId: createSafeId(),
         userId: localUser.id,
         createdAt: Date.now(),
         docNames: [draggedDocName, targetDocName],
@@ -2042,7 +2138,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       }));
 
       appendActionLog({
-        opId: crypto.randomUUID(),
+        opId: createSafeId(),
         userId: localUser.id,
         createdAt: Date.now(),
         docNames,
@@ -2087,7 +2183,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       }));
 
       appendActionLog({
-        opId: crypto.randomUUID(),
+        opId: createSafeId(),
         userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
@@ -2112,7 +2208,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       focusHierarchyNode(draggedId);
 
       appendActionLog({
-        opId: crypto.randomUUID(),
+        opId: createSafeId(),
         userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
@@ -2129,7 +2225,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       updateActiveSeriesDoc((doc) => syncSeriesBodyWithHierarchy(indentHierarchyNode(doc, nodeId)));
       focusHierarchyNode(nodeId);
       appendActionLog({
-        opId: crypto.randomUUID(),
+        opId: createSafeId(),
         userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
@@ -2146,7 +2242,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       updateActiveSeriesDoc((doc) => syncSeriesBodyWithHierarchy(outdentHierarchyNode(doc, nodeId)));
       focusHierarchyNode(nodeId);
       appendActionLog({
-        opId: crypto.randomUUID(),
+        opId: createSafeId(),
         userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
@@ -2160,7 +2256,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
   const applyManualHierarchyAddChild = useCallback(
     (parentId: string, level: HierarchyLevel) => {
-      const insertedId = `${level}-${crypto.randomUUID()}`;
+      const insertedId = `${level}-${createSafeId()}`;
       updateActiveSeriesDoc((doc) =>
         syncSeriesBodyWithHierarchy(
           addHierarchyChildNode(doc, parentId, level, {
@@ -2170,7 +2266,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       );
       focusHierarchyNode(insertedId);
       appendActionLog({
-        opId: crypto.randomUUID(),
+        opId: createSafeId(),
         userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
@@ -2190,7 +2286,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         focusHierarchyNode(fallbackFocusId);
       }
       appendActionLog({
-        opId: crypto.randomUUID(),
+        opId: createSafeId(),
         userId: localUser.id,
         createdAt: Date.now(),
         docNames: [workspace.activeSeriesDocName],
@@ -2247,7 +2343,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     }));
 
     appendActionLog({
-      opId: crypto.randomUUID(),
+      opId: createSafeId(),
       userId: localUser.id,
       createdAt: Date.now(),
       docNames: [SERIES_A_DOC_NAME, SERIES_B_DOC_NAME],
@@ -2396,19 +2492,25 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   );
 
   if (!activeManifestDoc || !activeSeriesDoc || !activeHierarchy || !currentFocusState) {
+    const activeManifestIsPlaceholder = Boolean(activeManifestDoc) && isPlaceholderManifestDoc(activeManifestDoc);
     const bootstrappingCollections = collabEnabled && workspace.collectionOrder.length === 0;
-    const bootstrappingSeries = Boolean(activeManifestDoc) && seriesRefs.length > 0 && !activeSeriesDoc;
-    const noSeriesAvailable = Boolean(activeManifestDoc) && seriesRefs.length === 0;
+    const bootstrappingSeries =
+      Boolean(activeManifestDoc) &&
+      ((seriesRefs.length > 0 && !activeSeriesDoc) || (activeManifestIsPlaceholder && seriesRefs.length === 0));
+    const noSeriesAvailable = Boolean(activeManifestDoc) && seriesRefs.length === 0 && !activeManifestIsPlaceholder;
     const showNoSeriesLoader = noSeriesAvailable && !showNoSeriesMessage;
+    const bootstrapping = bootstrappingCollections || bootstrappingSeries || showNoSeriesLoader;
     return (
       <div className="app-shell">
-        {bootstrappingCollections || bootstrappingSeries
-          ? 'Loading collection documents…'
-          : showNoSeriesLoader
-            ? 'Loading collection documents…'
-            : noSeriesAvailable
-            ? 'No series documents are available for this collection yet.'
-            : 'No active series document loaded.'}
+        {bootstrapping ? (
+          <div className="app-shell__loading" role="status" aria-live="polite" aria-label="Loading">
+            <span className="app-shell__loading-dot" />
+          </div>
+        ) : noSeriesAvailable ? (
+          'No series documents are available for this collection yet.'
+        ) : (
+          'No active series document loaded.'
+        )}
       </div>
     );
   }
@@ -3230,6 +3332,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
           ) : null}
         </main>
         <aside className={historyPanelCollapsed ? 'workspace-context workspace-context--collapsed' : 'workspace-context'}>
+          <GuidedAgentSidebar onPromptSubmit={handleAgentPromptSubmit} thinking={agentThinking} />
           <section
             className={historyPanelCollapsed ? 'panel revisions-panel revisions-panel--collapsed' : 'panel revisions-panel'}
             aria-label="Series revision history"
@@ -4336,45 +4439,6 @@ function isPlaceholderSeriesDoc(doc: SeriesDoc): boolean {
   }
   const text = readPlainText(body as PMNode).replace(/\s+/g, ' ').trim();
   return text.includes(PLACEHOLDER_SERIES_BODY_TEXT);
-}
-
-function buildCanonicalSeriesSeeds(args: {
-  manifestsByCollectionId: Record<string, CollectionManifestDoc>;
-  seriesDocs: Record<string, SeriesDoc>;
-  orgId?: string;
-}): Array<{ docName: string; initialValue: SeriesDoc }> {
-  if (!args.orgId) {
-    return [];
-  }
-
-  const seeds: Array<{ docName: string; initialValue: SeriesDoc }> = [];
-  const seenDocNames = new Set<string>();
-
-  for (const [collectionId, manifest] of Object.entries(args.manifestsByCollectionId)) {
-    const normalizedManifest = normalizeManifestSeriesRefsForOrg(manifest, collectionId, args.orgId).manifest;
-    for (const ref of readManifestSeriesRefs(normalizedManifest)) {
-      if (!ref.docName || seenDocNames.has(ref.docName)) {
-        continue;
-      }
-
-      const fallbackLegacyDocName = seriesDocName(
-        collectionId,
-        ref.seriesId || extractSeriesIdFromDocName(ref.docName),
-      );
-      const initialValue =
-        args.seriesDocs[ref.docName] ??
-        args.seriesDocs[fallbackLegacyDocName] ??
-        createPlaceholderSeriesDoc(ref.seriesId || extractSeriesIdFromDocName(ref.docName), ref.title);
-
-      seeds.push({
-        docName: ref.docName,
-        initialValue: structuredClone(initialValue),
-      });
-      seenDocNames.add(ref.docName);
-    }
-  }
-
-  return seeds;
 }
 
 function createInitialWorkspace(): WorkspaceState {
