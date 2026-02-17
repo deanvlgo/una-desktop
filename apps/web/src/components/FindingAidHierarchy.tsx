@@ -3,7 +3,7 @@ import {
   HierarchyTreeWidget,
   type HierarchyWidgetMovePlacement,
   type HierarchyWidgetRow,
-} from '@archival/hierarchy-widget';
+} from '../../../../packages/hierarchy-widget/src';
 
 import {
   collectAncestorIds,
