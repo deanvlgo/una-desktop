@@ -1,6 +1,6 @@
 import { getAccessToken } from './auth';
 
-const DEFAULT_API_BASE = 'http://localhost:8081';
+const DEFAULT_API_BASE = 'http://localhost:8084';
 
 function readApiBaseUrl() {
   const raw = import.meta.env.VITE_UNA_API_BASE_URL;
