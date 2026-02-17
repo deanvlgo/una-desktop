@@ -67,13 +67,10 @@ function readEnabledFlag(raw: string | undefined): boolean {
 }
 
 export function sharedCollectionsApiEnabled(): boolean {
-  if (typeof window !== 'undefined') {
-    const query = new URLSearchParams(window.location.search).get('sharedCollectionsApi');
-    if (query != null) {
-      return query !== '0';
-    }
-  }
-  return readEnabledFlag(import.meta.env.VITE_USE_SHARED_COLLECTIONS_API);
+  // Collection discovery is Hocuspocus org-index only.
+  // Keep shared API helpers available for migration utilities, but never enable
+  // this data source in the desktop runtime.
+  return false;
 }
 
 function normalizeIso(value: unknown, fallbackIso: string): string {
