@@ -808,22 +808,26 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   }, [currentFocusState, jsonViewDebugMode, updateCurrentFocusState]);
 
   const applyWorkspaceFromCollab = useCallback((changedDocName?: string) => {
-    void changedDocName;
     const collab = collabClientRef.current;
     if (!collab) {
       return;
     }
 
     setWorkspace((previous) => {
+      const changedDoc = changedDocName ? parseDocName(changedDocName) : null;
+      const changedCollectionId =
+        changedDoc && (changedDoc.kind === 'manifest' || changedDoc.kind === 'series') ? changedDoc.collectionId : null;
+      const fullReconcile = !changedCollectionId || changedDoc?.kind === 'org_index';
+
       let nextManifests = previous.manifestsByCollectionId;
       let nextSeriesDocs = previous.seriesDocs;
       let nextActiveSeriesDocName = previous.activeSeriesDocName;
       let changed = false;
       const legacyToCanonicalDocNames: Record<string, string> = {};
 
-      const targetCollectionIds = Array.from(
-        new Set([...previous.collectionOrder, ...Object.keys(canonicalEntriesRef.current)]),
-      );
+      const targetCollectionIds = fullReconcile
+        ? Array.from(new Set([...previous.collectionOrder, ...Object.keys(canonicalEntriesRef.current)]))
+        : Array.from(new Set([changedCollectionId, previous.activeCollectionId].filter((value): value is string => Boolean(value))));
 
       for (const collectionId of targetCollectionIds) {
         const sourceObjectId = canonicalEntriesRef.current[collectionId]?.sourceObjectId;
@@ -856,7 +860,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         }
       }
 
-      for (const collectionId of previous.collectionOrder) {
+      for (const collectionId of targetCollectionIds) {
         const manifest = nextManifests[collectionId];
         if (!manifest) {
           continue;
@@ -888,7 +892,15 @@ export function App({ currentUser, token, onLogout }: AppProps) {
       const manifestsForSeriesRefs =
         nextManifests === previous.manifestsByCollectionId ? previous.manifestsByCollectionId : nextManifests;
 
-      for (const [collectionId, manifest] of Object.entries(manifestsForSeriesRefs)) {
+      const collectionIdsForSeriesRefs = fullReconcile
+        ? Object.keys(manifestsForSeriesRefs)
+        : Array.from(new Set([changedCollectionId, previous.activeCollectionId].filter((value): value is string => Boolean(value))));
+
+      for (const collectionId of collectionIdsForSeriesRefs) {
+        const manifest = manifestsForSeriesRefs[collectionId];
+        if (!manifest) {
+          continue;
+        }
         for (const ref of readManifestSeriesRefs(manifest)) {
           if (!ref.docName) {
             continue;
