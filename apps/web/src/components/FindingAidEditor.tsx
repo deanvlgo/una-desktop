@@ -1,7 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { JSONContent, Mark, Node, mergeAttributes } from '@tiptap/core';
-import { TextSelection } from '@tiptap/pm/state';
 import Collaboration from '@tiptap/extension-collaboration';
 import CollaborationCursor from '@tiptap/extension-collaboration-cursor';
 import Heading from '@tiptap/extension-heading';
@@ -15,8 +14,6 @@ import PaginationExtension, { BodyNode, HeaderFooterNode, PageNode } from 'tipta
 import type { PMNode } from '../../../../src/contracts/types';
 import { formatHierarchyNodeHeading, getHierarchyLevelLabel } from '../lib/hierarchyLabels';
 import { userInitials } from '../lib/user';
-
-const PAGINATED_COLLAB_FIELD = 'tiptap_pages_v2';
 
 type HierarchyLevel = 'series' | 'subseries' | 'file' | 'item';
 
@@ -259,27 +256,7 @@ function normalizeHierarchySectionContent(content: PMNode[], hierarchyHeadings: 
     }
   }
 
-  return collapseAdjacentDuplicateNodes(normalized);
-}
-
-function collapseAdjacentDuplicateNodes(nodes: PMNode[]): PMNode[] {
-  if (nodes.length <= 1) {
-    return nodes;
-  }
-
-  const collapsed: PMNode[] = [];
-  let lastSignature = '';
-
-  for (const node of nodes) {
-    const signature = JSON.stringify(node);
-    if (signature === lastSignature) {
-      continue;
-    }
-    collapsed.push(structuredClone(node));
-    lastSignature = signature;
-  }
-
-  return collapsed;
+  return normalized;
 }
 
 function contentToDoc(content: PMNode[], hierarchyHeadings: HierarchyHeading[]): JSONContent {
@@ -287,17 +264,7 @@ function contentToDoc(content: PMNode[], hierarchyHeadings: HierarchyHeading[]):
 
   return {
     type: 'doc',
-    content: [
-      {
-        type: 'page',
-        content: [
-          {
-            type: 'body',
-            content: normalized as unknown as JSONContent[],
-          },
-        ],
-      },
-    ],
+    content: normalized as unknown as JSONContent[],
   };
 }
 
@@ -314,53 +281,9 @@ function readContentFromEditor(json: JSONContent): PMNode[] {
   return flattenPaginationNodes(nodes);
 }
 
-function findFirstInlineSelectionPos(doc: Parameters<typeof TextSelection.near>[0]['doc']): number | null {
-  let position: number | null = null;
-
-  doc.descendants((node, pos) => {
-    if (node.isTextblock && node.inlineContent) {
-      position = pos + 1;
-      return false;
-    }
-    return true;
-  });
-
-  return position;
-}
-
-function ensureInlineSelection(editor: NonNullable<ReturnType<typeof useEditor>>) {
-  const { selection, doc } = editor.state;
-  if (selection.$anchor.parent.inlineContent && selection.$head.parent.inlineContent) {
-    return;
-  }
-
-  const firstInlinePos = findFirstInlineSelectionPos(doc);
-  if (firstInlinePos == null) {
-    return;
-  }
-
-  const maxPos = Math.max(1, doc.content.size);
-  const safePos = Math.max(1, Math.min(firstInlinePos, maxPos));
-  let nextSelection: TextSelection | null = null;
-  try {
-    nextSelection = TextSelection.create(doc, safePos);
-  } catch {
-    nextSelection = null;
-  }
-
-  if (!nextSelection) {
-    return;
-  }
-  if (selection.from === nextSelection.from && selection.to === nextSelection.to) {
-    return;
-  }
-  editor.view.dispatch(editor.state.tr.setSelection(nextSelection));
-}
-
 function flattenPaginationNodes(nodes: PMNode[]): PMNode[] {
   const flattened: PMNode[] = [];
   const pageBodySignatures = new Set<string>();
-  const hasPageNodes = nodes.some((node) => node.type === 'page');
 
   for (const node of nodes) {
     if (node.type === 'page') {
@@ -375,10 +298,6 @@ function flattenPaginationNodes(nodes: PMNode[]): PMNode[] {
       for (const child of bodyContent) {
         flattened.push(structuredClone(child));
       }
-      continue;
-    }
-
-    if (hasPageNodes) {
       continue;
     }
 
@@ -670,7 +589,6 @@ export function FindingAidEditor({
   const syncedHierarchySignatureRef = useRef(hierarchySignature);
   const syncedHierarchyHeadingsRef = useRef(hierarchyHeadings);
   const hasHydratedCollabFromCanonicalRef = useRef(false);
-  const selectionRepairRafRef = useRef<number | null>(null);
   const [sectionDepth, setSectionDepth] = useState(0);
 
   useEffect(() => {
@@ -725,7 +643,7 @@ export function FindingAidEditor({
         ...base,
         Collaboration.configure({
           document: collaborationProvider.document,
-          field: PAGINATED_COLLAB_FIELD,
+          field: 'tiptap',
         }),
         CollaborationCursor.configure({
           provider: collaborationProvider,
@@ -763,7 +681,6 @@ export function FindingAidEditor({
       ];
     })(),
     content: contentToDoc(content, hierarchyHeadings),
-    onCreate: () => {},
     editorProps: {
       attributes: {
         class: 'finding-aid__prose finding-aid__prose--paginated',
@@ -813,32 +730,9 @@ export function FindingAidEditor({
   }, [collaborationEnabled, collaborationProvider, collaborationUser?.avatar, collaborationUser?.name, collaborationUser?.color]);
 
   useEffect(() => {
-    if (selectionRepairRafRef.current != null) {
-      cancelAnimationFrame(selectionRepairRafRef.current);
-      selectionRepairRafRef.current = null;
-    }
-    return () => {
-      if (selectionRepairRafRef.current != null) {
-        cancelAnimationFrame(selectionRepairRafRef.current);
-        selectionRepairRafRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (!editor) {
       return;
     }
-
-    const scheduleInlineSelectionRepair = () => {
-      if (selectionRepairRafRef.current != null) {
-        cancelAnimationFrame(selectionRepairRafRef.current);
-      }
-      selectionRepairRafRef.current = requestAnimationFrame(() => {
-        selectionRepairRafRef.current = null;
-        ensureInlineSelection(editor);
-      });
-    };
 
     const shouldSeedEmptyCollabDoc =
       collaborationEnabled && editor.isEmpty && (content.length > 0 || hierarchyHeadings.length > 0);
@@ -847,7 +741,6 @@ export function FindingAidEditor({
       isApplyingRef.current = true;
       editor.commands.setContent(contentToDoc(content, hierarchyHeadings), false);
       isApplyingRef.current = false;
-      scheduleInlineSelectionRepair();
 
       syncedContentSignatureRef.current = contentSignature;
       syncedHierarchySignatureRef.current = hierarchySignature;
@@ -873,7 +766,6 @@ export function FindingAidEditor({
           isApplyingRef.current = true;
           editor.commands.setContent(contentToDoc(content, hierarchyHeadings), false);
           isApplyingRef.current = false;
-          scheduleInlineSelectionRepair();
 
           syncedContentSignatureRef.current = contentSignature;
           syncedHierarchySignatureRef.current = hierarchySignature;
@@ -912,7 +804,6 @@ export function FindingAidEditor({
     isApplyingRef.current = true;
     editor.commands.setContent(contentToDoc(content, hierarchyHeadings), false);
     isApplyingRef.current = false;
-    scheduleInlineSelectionRepair();
 
     syncedContentSignatureRef.current = contentSignature;
     syncedHierarchySignatureRef.current = hierarchySignature;
