@@ -246,6 +246,35 @@ body {
   margin: 1rem auto 1.8rem;
 }
 
+.app-shell__loading {
+  min-height: 42vh;
+  display: grid;
+  place-items: center;
+}
+
+.app-shell__loading-dot {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  animation: app-loading-pulse 1s ease-in-out infinite;
+}
+
+@keyframes app-loading-pulse {
+  0% {
+    transform: scale(0.8);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.8);
+    opacity: 0.45;
+  }
+}
+
 .workspace-header {
   display: flex;
   justify-content: space-between;
@@ -679,8 +708,8 @@ body {
 }
 
 .workspace-context--collapsed {
-  width: 56px;
-  min-width: 56px;
+  width: 84px;
+  min-width: 84px;
 }
 
 .workspace-main__mode-row {
@@ -960,6 +989,34 @@ body {
 
 .browser-panel {
   min-height: 560px;
+}
+
+.desktop-agent-panel {
+  display: flex;
+  justify-content: flex-end;
+  position: fixed;
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: max(14px, env(safe-area-inset-bottom, 0px));
+  z-index: 120;
+  pointer-events: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.desktop-agent-panel__widget-host {
+  width: fit-content;
+  max-width: min(320px, calc(100vw - 24px));
+  display: flex;
+  justify-content: flex-end;
+  overflow: visible;
+  pointer-events: auto;
+}
+
+.desktop-agent-panel__widget-host > * {
+  margin: 0;
+  max-width: 100%;
 }
 
 .browser-panel__hint {
@@ -2302,11 +2359,17 @@ body {
 }
 
 .revisions-panel--collapsed {
-  display: flex;
-  align-items: flex-start;
+  display: inline-flex;
+  align-items: center;
   justify-content: center;
-  min-height: auto;
-  padding: 0.35rem 0.25rem;
+  justify-self: end;
+  width: fit-content;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .revisions-panel__header {
@@ -2351,16 +2414,24 @@ body {
   border-radius: 0.55rem;
   background: linear-gradient(180deg, #f8fbff, #eef4ff);
   color: #102645;
-  width: 2rem;
-  height: 2rem;
+  width: 1.75rem;
+  height: 1.75rem;
   display: grid;
   place-items: center;
   cursor: pointer;
+  padding: 0;
 }
 
 .workspace-context-actions {
-  display: grid;
-  gap: 0.36rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.34rem;
+  border: 1px solid #dbe3f0;
+  border-radius: 0.8rem;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
 }
 
 .export-flyout {
