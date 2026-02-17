@@ -30,6 +30,8 @@ const geminiModel = String(process.env.GEMINI_SNAPSHOT_MODEL ?? 'gemini-2.5-flas
 const diffWorkerEnabled = String(process.env.HOCUSPOCUS_DIFF_WORKER_ENABLED ?? '1').trim() !== '0';
 const diffWorkerIntervalMs = Math.max(500, Number(process.env.HOCUSPOCUS_DIFF_WORKER_INTERVAL_MS ?? 2000));
 const diffWorkerMaxJobsPerTick = Math.max(1, Math.min(10, Number(process.env.HOCUSPOCUS_DIFF_WORKER_MAX_JOBS ?? 1)));
+const postgresWriteRetryAttempts = Math.max(1, Math.min(8, Number(process.env.HOCUSPOCUS_PG_WRITE_RETRIES ?? 3)));
+const postgresWriteRetryBaseMs = Math.max(50, Math.min(5000, Number(process.env.HOCUSPOCUS_PG_WRITE_RETRY_BASE_MS ?? 150)));
 
 const dataDir =
   process.env.HOCUSPOCUS_DATA_DIR != null
@@ -165,6 +167,52 @@ function quoteIdentifier(identifier: string): string {
     throw new Error(`Invalid SQL identifier: ${identifier}`);
   }
   return `"${identifier}"`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function isRetriablePostgresError(error: unknown): boolean {
+  const record = error as { code?: unknown; message?: unknown; errno?: unknown };
+  const code = typeof record?.code === 'string' ? record.code : null;
+  const errno = typeof record?.errno === 'string' ? record.errno : null;
+  const message = typeof record?.message === 'string' ? record.message : '';
+
+  if (code && ['57P01', '57P02', '57P03', '08000', '08003', '08006', '53300'].includes(code)) {
+    return true;
+  }
+  if (errno && ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE'].includes(errno)) {
+    return true;
+  }
+  return (
+    message.includes('Connection terminated unexpectedly') ||
+    message.includes('Connection ended unexpectedly') ||
+    message.includes('terminating connection') ||
+    message.includes('server closed the connection unexpectedly')
+  );
+}
+
+async function runPostgresWithRetry<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await operation();
+    } catch (error) {
+      attempt += 1;
+      const shouldRetry = attempt < postgresWriteRetryAttempts && isRetriablePostgresError(error);
+      if (!shouldRetry) {
+        throw error;
+      }
+      const delayMs = Math.min(2000, postgresWriteRetryBaseMs * 2 ** (attempt - 1));
+      console.warn(
+        `[hocuspocus] ${label} failed (attempt ${attempt}/${postgresWriteRetryAttempts}); retrying in ${delayMs}ms`,
+      );
+      await sleep(delayMs);
+    }
+  }
 }
 
 function parseRoomName(documentName: string): ParsedRoom | null {
@@ -1222,41 +1270,51 @@ async function main(): Promise<void> {
                 const actorId = typeof context?.user?.id === 'string' ? context.user.id : null;
                 const actorType = typeof context?.actorType === 'string' ? context.actorType : 'human';
                 const requestId = typeof context?.requestId === 'string' ? context.requestId : null;
-                await postgresPool.query(
-                  `
-                    INSERT INTO ${documentsTable} (document_name, org_id, data, updated_at)
-                    VALUES ($1, $2, $3, NOW())
-                    ON CONFLICT (document_name)
-                    DO UPDATE SET org_id = EXCLUDED.org_id, data = EXCLUDED.data, updated_at = NOW()
-                  `,
-                  [documentName, orgId, Buffer.from(state)],
-                );
-
-                const now = Date.now();
-                const previousSnapshotAt = lastSnapshotAtByDoc.get(documentName) ?? 0;
-                const shouldCreateSnapshot = now - previousSnapshotAt >= Math.max(1000, snapshotIntervalMs);
-                if (shouldCreateSnapshot) {
-                  const previousSnapshot = await postgresPool.query<{ id: number }>(
-                    `
-                      SELECT id
-                      FROM ${snapshotsTable}
-                      WHERE document_name = $1
-                      ORDER BY created_at DESC
-                      LIMIT 1
-                    `,
-                    [documentName],
+                try {
+                  await runPostgresWithRetry('store document state', () =>
+                    postgresPool.query(
+                      `
+                        INSERT INTO ${documentsTable} (document_name, org_id, data, updated_at)
+                        VALUES ($1, $2, $3, NOW())
+                        ON CONFLICT (document_name)
+                        DO UPDATE SET org_id = EXCLUDED.org_id, data = EXCLUDED.data, updated_at = NOW()
+                      `,
+                      [documentName, orgId, Buffer.from(state)],
+                    ),
                   );
-                  const previousSnapshotId = previousSnapshot.rowCount ? (previousSnapshot.rows[0]?.id ?? null) : null;
 
-                  await postgresPool.query(
-                    `
-                      INSERT INTO ${snapshotsTable}
-                        (document_name, org_id, actor_id, actor_type, request_id, source, summary, reverted_from_snapshot_id, previous_snapshot_id, diff_status, diff_json, diff_error, state, created_at)
-                      VALUES ($1, $2, $3, $4, $5, 'store', NULL, NULL, $6, 'pending', NULL, NULL, $7, NOW())
-                    `,
-                    [documentName, orgId, actorId, actorType, requestId, previousSnapshotId, Buffer.from(state)],
-                  );
-                  lastSnapshotAtByDoc.set(documentName, now);
+                  const now = Date.now();
+                  const previousSnapshotAt = lastSnapshotAtByDoc.get(documentName) ?? 0;
+                  const shouldCreateSnapshot = now - previousSnapshotAt >= Math.max(1000, snapshotIntervalMs);
+                  if (shouldCreateSnapshot) {
+                    const previousSnapshot = await runPostgresWithRetry('query previous snapshot', () =>
+                      postgresPool.query<{ id: number }>(
+                        `
+                          SELECT id
+                          FROM ${snapshotsTable}
+                          WHERE document_name = $1
+                          ORDER BY created_at DESC
+                          LIMIT 1
+                        `,
+                        [documentName],
+                      ),
+                    );
+                    const previousSnapshotId = previousSnapshot.rowCount ? (previousSnapshot.rows[0]?.id ?? null) : null;
+
+                    await runPostgresWithRetry('insert snapshot state', () =>
+                      postgresPool.query(
+                        `
+                          INSERT INTO ${snapshotsTable}
+                            (document_name, org_id, actor_id, actor_type, request_id, source, summary, reverted_from_snapshot_id, previous_snapshot_id, diff_status, diff_json, diff_error, state, created_at)
+                          VALUES ($1, $2, $3, $4, $5, 'store', NULL, NULL, $6, 'pending', NULL, NULL, $7, NOW())
+                        `,
+                        [documentName, orgId, actorId, actorType, requestId, previousSnapshotId, Buffer.from(state)],
+                      ),
+                    );
+                    lastSnapshotAtByDoc.set(documentName, now);
+                  }
+                } catch (error) {
+                  console.error(`[hocuspocus] failed to persist document ${documentName}:`, error);
                 }
               },
             }),
@@ -1266,14 +1324,20 @@ async function main(): Promise<void> {
             const actorId = typeof data.context?.user?.id === 'string' ? data.context.user.id : null;
             const actorType = typeof data.context?.actorType === 'string' ? data.context.actorType : 'human';
             const requestId = typeof data.context?.requestId === 'string' ? data.context.requestId : null;
-            await postgresPool.query(
-              `
-                INSERT INTO ${updatesTable}
-                  (document_name, org_id, actor_id, actor_type, request_id, update, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, NOW())
-              `,
-              [data.documentName, orgId, actorId, actorType, requestId, Buffer.from(data.update)],
-            );
+            try {
+              await runPostgresWithRetry('insert incremental update', () =>
+                postgresPool.query(
+                  `
+                    INSERT INTO ${updatesTable}
+                      (document_name, org_id, actor_id, actor_type, request_id, update, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                  `,
+                  [data.documentName, orgId, actorId, actorType, requestId, Buffer.from(data.update)],
+                ),
+              );
+            } catch (error) {
+              console.error(`[hocuspocus] failed to persist incremental update for ${data.documentName}:`, error);
+            }
           },
         }
       : {
