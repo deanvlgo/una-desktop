@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { LoginScreen } from './components/LoginScreen';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import '@archival/hierarchy-widget/styles.css';
 import './styles.css';
 
 function Root() {

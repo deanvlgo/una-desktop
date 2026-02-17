@@ -1,4 +1,9 @@
-import { type CSSProperties, type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo } from 'react';
+import {
+  HierarchyTreeWidget,
+  type HierarchyWidgetMovePlacement,
+  type HierarchyWidgetRow,
+} from '@archival/hierarchy-widget';
 
 import {
   collectAncestorIds,
@@ -7,10 +12,9 @@ import {
   type HierarchyLevel,
   type HierarchyNode,
 } from '../lib/series';
-import { toRomanNumeral } from '../lib/hierarchyLabels';
 import { userInitials } from '../lib/user';
 
-type PresenceUser = { id: string; name: string; color: string; avatar?: string };
+type PresenceUser = { id: string; name: string; color: string };
 
 type SeriesOption = {
   docName: string;
@@ -27,8 +31,8 @@ type FindingAidHierarchyProps = {
   onFocus: (id: string) => void;
   onJumpToDocument?: (id: string) => void;
   onToggleExpand: (id: string) => void;
-  onMove: (draggedId: string, targetId: string, placement: 'before' | 'after') => void;
-  onMoveSeries?: (draggedDocName: string, targetDocName: string, placement: 'before' | 'after') => void;
+  onMove: (draggedId: string, targetId: string, placement: HierarchyWidgetMovePlacement) => void;
+  onMoveSeries?: (draggedDocName: string, targetDocName: string, placement: HierarchyWidgetMovePlacement) => void;
   onIndent: (id: string) => void;
   onOutdent: (id: string) => void;
   onAddChild: (parentId: string, level: HierarchyLevel) => void;
@@ -53,11 +57,6 @@ type OutlineEntry = {
   isActiveSeries?: boolean;
 };
 
-type DropTarget = {
-  id: string;
-  placement: 'before' | 'after';
-};
-
 type SiblingMeta = {
   prevId: string | null;
   nextId: string | null;
@@ -68,13 +67,6 @@ const LEVEL_LABELS: Record<HierarchyLevel, string> = {
   subseries: 'Subseries',
   file: 'File',
   item: 'Item',
-};
-
-const LEVEL_COLORS: Record<HierarchyLevel, string> = {
-  series: '#ff5757',
-  subseries: '#ff5757',
-  file: '#3b82f6',
-  item: '#6b7280',
 };
 
 export function FindingAidHierarchy({
@@ -118,7 +110,7 @@ export function FindingAidHierarchy({
         hasActiveSeriesRow = true;
         return {
           ...activeRoot,
-          pathLabel: toRomanNumeral(index + 1),
+          pathLabel: String(index + 1),
           isActiveSeries: true,
           seriesDocName: series.docName,
           seriesPresenceCount: series.presenceCount,
@@ -134,7 +126,7 @@ export function FindingAidHierarchy({
         hasChildren: true,
         expanded: false,
         isFocused: false,
-        pathLabel: toRomanNumeral(index + 1),
+        pathLabel: String(index + 1),
         kind: 'seriesRef',
         seriesDocName: series.docName,
         seriesPresenceCount: series.presenceCount,
@@ -151,7 +143,7 @@ export function FindingAidHierarchy({
         seriesDocName: activeSeriesDocName,
         seriesPresenceCount:
           activeOptionIndex >= 0 ? seriesOptions[activeOptionIndex]?.presenceCount : activeRoot.seriesPresenceCount,
-        pathLabel: activeOptionIndex >= 0 ? toRomanNumeral(activeOptionIndex + 1) : activeRoot.pathLabel,
+        pathLabel: activeOptionIndex >= 0 ? String(activeOptionIndex + 1) : activeRoot.pathLabel,
       });
       stitched.push(...activeDescendants);
       stitched.push(...seriesRows);
@@ -205,64 +197,52 @@ export function FindingAidHierarchy({
     return map;
   }, [siblingOrderByParent]);
 
-  const [draggedId, setDraggedId] = useState<string | null>(null);
-  const pointerDraggedIdRef = useRef<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<DropTarget | null>(null);
-  const [dropEnd, setDropEnd] = useState(false);
-  const [addMenuOpenId, setAddMenuOpenId] = useState<string | null>(null);
-  const [actionMenuOpenId, setActionMenuOpenId] = useState<string | null>(null);
-
-  const beginPointerDrag = (
-    event: ReactPointerEvent,
-    nodeId: string,
-    depth: number,
-    allowDepthZero: boolean = false,
-  ) => {
-    if (depth === 0 && !allowDepthZero) {
-      return;
-    }
-
-    const target = event.target as HTMLElement | null;
-    if (target?.closest('input, textarea, select, button, a')) {
-      return;
-    }
-
-    pointerDraggedIdRef.current = nodeId;
-    setDraggedId(nodeId);
-    setDropTarget(null);
-    setDropEnd(false);
-    setAddMenuOpenId(null);
-    setActionMenuOpenId(null);
-    event.preventDefault();
-  };
-
-  const endPointerDrag = () => {
-    pointerDraggedIdRef.current = null;
-    setDraggedId(null);
-    setDropTarget(null);
-    setDropEnd(false);
-  };
-
-  const canDrop = (sourceId: string, targetId: string, placement: 'before' | 'after'): boolean => {
-    if (sourceId === targetId) {
-      return false;
-    }
-
-    const source = outlineById.get(sourceId);
-    const target = outlineById.get(targetId);
-    if (!source || !target) {
-      return false;
-    }
-
-    const sourceIsSeriesRow = source.level === 'series' && source.depth === 0 && Boolean(source.seriesDocName);
-    const targetIsSeriesRow = target.level === 'series' && target.depth === 0 && Boolean(target.seriesDocName);
-
-    if (sourceIsSeriesRow || targetIsSeriesRow) {
-      if (!sourceIsSeriesRow || !targetIsSeriesRow || !onMoveSeries) {
+  const canDrop = useCallback(
+    (sourceId: string, targetId: string, placement: HierarchyWidgetMovePlacement): boolean => {
+      if (sourceId === targetId) {
         return false;
       }
 
-      const key = 'root::series';
+      const source = outlineById.get(sourceId);
+      const target = outlineById.get(targetId);
+      if (!source || !target) {
+        return false;
+      }
+
+      const sourceIsSeriesRow = isSeriesRowEntry(source);
+      const targetIsSeriesRow = isSeriesRowEntry(target);
+
+      if (sourceIsSeriesRow || targetIsSeriesRow) {
+        if (!sourceIsSeriesRow || !targetIsSeriesRow || !onMoveSeries) {
+          return false;
+        }
+
+        const key = 'root::series';
+        const siblings = siblingOrderByParent.get(key) ?? [];
+        const fromIndex = siblings.findIndex((entry) => entry.id === sourceId);
+        const targetIndex = siblings.findIndex((entry) => entry.id === targetId);
+
+        if (fromIndex < 0 || targetIndex < 0) {
+          return false;
+        }
+
+        let insertIndex = placement === 'before' ? targetIndex : targetIndex + 1;
+        if (fromIndex < insertIndex) {
+          insertIndex -= 1;
+        }
+
+        return insertIndex !== fromIndex;
+      }
+
+      if (source.kind !== 'node' || target.kind !== 'node' || source.depth === 0 || source.level !== target.level) {
+        return false;
+      }
+
+      if (source.parentId !== target.parentId) {
+        return true;
+      }
+
+      const key = `${source.parentId ?? 'root'}::${source.level}`;
       const siblings = siblingOrderByParent.get(key) ?? [];
       const fromIndex = siblings.findIndex((entry) => entry.id === sourceId);
       const targetIndex = siblings.findIndex((entry) => entry.id === targetId);
@@ -277,46 +257,41 @@ export function FindingAidHierarchy({
       }
 
       return insertIndex !== fromIndex;
-    }
+    },
+    [onMoveSeries, outlineById, siblingOrderByParent],
+  );
 
-    if (source.kind !== 'node' || target.kind !== 'node' || source.depth === 0 || source.level !== target.level) {
-      return false;
-    }
-
-    if (source.parentId !== target.parentId) {
-      return true;
-    }
-
-    const key = `${source.parentId ?? 'root'}::${source.level}`;
-    const siblings = siblingOrderByParent.get(key) ?? [];
-    const fromIndex = siblings.findIndex((entry) => entry.id === sourceId);
-    const targetIndex = siblings.findIndex((entry) => entry.id === targetId);
-
-    if (fromIndex < 0 || targetIndex < 0) {
-      return false;
-    }
-
-    let insertIndex = placement === 'before' ? targetIndex : targetIndex + 1;
-    if (fromIndex < insertIndex) {
-      insertIndex -= 1;
-    }
-
-    return insertIndex !== fromIndex;
-  };
-
-  const moveToEndTarget = (sourceId: string): { targetId: string; placement: 'after' } | null => {
-    const source = outlineById.get(sourceId);
-    if (!source) {
-      return null;
-    }
-
-    const sourceIsSeriesRow = source.level === 'series' && source.depth === 0 && Boolean(source.seriesDocName);
-    if (sourceIsSeriesRow) {
-      if (!onMoveSeries) {
+  const moveToEndTarget = useCallback(
+    (sourceId: string): { targetId: string; placement: HierarchyWidgetMovePlacement } | null => {
+      const source = outlineById.get(sourceId);
+      if (!source) {
         return null;
       }
 
-      const siblings = siblingOrderByParent.get('root::series') ?? [];
+      if (isSeriesRowEntry(source)) {
+        if (!onMoveSeries) {
+          return null;
+        }
+
+        const siblings = siblingOrderByParent.get('root::series') ?? [];
+        if (siblings.length <= 1) {
+          return null;
+        }
+
+        const last = siblings[siblings.length - 1];
+        if (!last || last.id === sourceId) {
+          return null;
+        }
+
+        return { targetId: last.id, placement: 'after' };
+      }
+
+      if (source.kind !== 'node' || source.depth === 0) {
+        return null;
+      }
+
+      const key = `${source.parentId ?? 'root'}::${source.level}`;
+      const siblings = siblingOrderByParent.get(key) ?? [];
       if (siblings.length <= 1) {
         return null;
       }
@@ -327,537 +302,106 @@ export function FindingAidHierarchy({
       }
 
       return { targetId: last.id, placement: 'after' };
-    }
+    },
+    [onMoveSeries, outlineById, siblingOrderByParent],
+  );
 
-    if (source.kind !== 'node' || source.depth === 0) {
-      return null;
-    }
-
-    const key = `${source.parentId ?? 'root'}::${source.level}`;
-    const siblings = siblingOrderByParent.get(key) ?? [];
-    if (siblings.length <= 1) {
-      return null;
-    }
-
-    const last = siblings[siblings.length - 1];
-    if (!last || last.id === sourceId) {
-      return null;
-    }
-
-    return { targetId: last.id, placement: 'after' };
-  };
-
-  const resolvePlacementFromClientY = (clientY: number, rect: DOMRect): 'before' | 'after' =>
-    clientY < rect.top + rect.height / 2 ? 'before' : 'after';
-
-  useEffect(() => {
-    if (!draggedId) {
-      return;
-    }
-
-    const resolveDropFromPointer = (clientX: number, clientY: number): DropTarget | null => {
-      const sourceId = pointerDraggedIdRef.current ?? draggedId;
-      if (!sourceId) {
-        return null;
-      }
-
-      const hovered = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-      const row = hovered?.closest<HTMLElement>('[data-hierarchy-row-id]');
-      const targetId = row?.dataset.hierarchyRowId;
-      if (!row || !targetId) {
-        return null;
-      }
-
-      const placement = resolvePlacementFromClientY(clientY, row.getBoundingClientRect());
-      if (!canDrop(sourceId, targetId, placement)) {
-        return null;
-      }
-
-      return { id: targetId, placement };
-    };
-
-    const handlePointerMove = (event: PointerEvent) => {
-      const sourceId = pointerDraggedIdRef.current ?? draggedId;
-      if (!sourceId) {
+  const handleMove = useCallback(
+    (sourceId: string, targetId: string, placement: HierarchyWidgetMovePlacement) => {
+      const source = outlineById.get(sourceId);
+      const target = outlineById.get(targetId);
+      if (!source || !target) {
         return;
       }
 
-      const maybeDrop = resolveDropFromPointer(event.clientX, event.clientY);
-      if (maybeDrop) {
-        setDropEnd(false);
-        if (dropTarget?.id !== maybeDrop.id || dropTarget.placement !== maybeDrop.placement) {
-          setDropTarget(maybeDrop);
-        }
+      const sourceIsSeriesRow = isSeriesRowEntry(source);
+      const targetIsSeriesRow = isSeriesRowEntry(target);
+      if (
+        sourceIsSeriesRow &&
+        targetIsSeriesRow &&
+        source.seriesDocName &&
+        target.seriesDocName &&
+        onMoveSeries
+      ) {
+        onMoveSeries(source.seriesDocName, target.seriesDocName, placement);
         return;
       }
 
-      const hovered = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
-      const onEndZone = hovered?.closest('.finding-hierarchy__outline-drop-end');
-      if (onEndZone && moveToEndTarget(sourceId)) {
-        if (dropTarget) {
-          setDropTarget(null);
-        }
-        if (!dropEnd) {
-          setDropEnd(true);
-        }
-        return;
-      }
+      onMove(sourceId, targetId, placement);
+    },
+    [onMove, onMoveSeries, outlineById],
+  );
 
-      if (dropTarget) {
-        setDropTarget(null);
-      }
-      if (dropEnd) {
-        setDropEnd(false);
-      }
-    };
+  const rows = useMemo<HierarchyWidgetRow[]>(() => {
+    return outline.map((entry) => {
+      const isNodeEntry = entry.kind === 'node';
+      const isSeriesRow = entry.level === 'series' && entry.depth === 0;
+      const siblingMeta = siblingMetaById.get(entry.id) ?? { prevId: null, nextId: null };
+      const addChildOptions = getAddChildLevelOptions(entry.level).map((level) => ({
+        level,
+        label: `Add ${LEVEL_LABELS[level]}`,
+      }));
 
-    const handlePointerEnd = (event: PointerEvent) => {
-      const sourceId = pointerDraggedIdRef.current ?? draggedId;
-      if (!sourceId) {
-        endPointerDrag();
-        return;
-      }
-
-      const maybeDrop = resolveDropFromPointer(event.clientX, event.clientY);
-      if (maybeDrop) {
-        const sourceEntry = outlineById.get(sourceId);
-        const targetEntry = outlineById.get(maybeDrop.id);
-        const sourceIsSeriesRow =
-          sourceEntry?.level === 'series' && sourceEntry.depth === 0 && Boolean(sourceEntry.seriesDocName);
-        const targetIsSeriesRow =
-          targetEntry?.level === 'series' && targetEntry.depth === 0 && Boolean(targetEntry.seriesDocName);
-
-        if (
-          sourceIsSeriesRow &&
-          targetIsSeriesRow &&
-          sourceEntry?.seriesDocName &&
-          targetEntry?.seriesDocName &&
-          onMoveSeries
-        ) {
-          onMoveSeries(sourceEntry.seriesDocName, targetEntry.seriesDocName, maybeDrop.placement);
-        } else {
-          onMove(sourceId, maybeDrop.id, maybeDrop.placement);
-        }
-        endPointerDrag();
-        return;
-      }
-
-      if (dropEnd) {
-        const moveTarget = moveToEndTarget(sourceId);
-        if (moveTarget) {
-          const sourceEntry = outlineById.get(sourceId);
-          const targetEntry = outlineById.get(moveTarget.targetId);
-          const sourceIsSeriesRow =
-            sourceEntry?.level === 'series' && sourceEntry.depth === 0 && Boolean(sourceEntry.seriesDocName);
-          const targetIsSeriesRow =
-            targetEntry?.level === 'series' && targetEntry.depth === 0 && Boolean(targetEntry.seriesDocName);
-
-          if (
-            sourceIsSeriesRow &&
-            targetIsSeriesRow &&
-            sourceEntry?.seriesDocName &&
-            targetEntry?.seriesDocName &&
-            onMoveSeries
-          ) {
-            onMoveSeries(sourceEntry.seriesDocName, targetEntry.seriesDocName, moveTarget.placement);
-          } else {
-            onMove(sourceId, moveTarget.targetId, moveTarget.placement);
-          }
-        }
-      }
-
-      endPointerDrag();
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerEnd);
-    window.addEventListener('pointercancel', handlePointerEnd);
-
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerEnd);
-      window.removeEventListener('pointercancel', handlePointerEnd);
-    };
-  }, [canDrop, draggedId, dropEnd, dropTarget, moveToEndTarget, onMove, onMoveSeries, outlineById]);
+      return {
+        id: entry.id,
+        parentId: entry.parentId,
+        level: entry.level,
+        depth: entry.depth,
+        title: entry.title,
+        hasChildren: entry.hasChildren,
+        expanded: entry.expanded,
+        pathLabel: entry.pathLabel,
+        kind: entry.kind,
+        isSelected: entry.isFocused || Boolean(entry.isActiveSeries && entry.depth === 0),
+        isActiveSeries: entry.isActiveSeries,
+        seriesDocName: entry.seriesDocName,
+        seriesPresenceCount: entry.seriesPresenceCount,
+        presence: isNodeEntry ? presenceByNodeId[entry.id] ?? [] : [],
+        canDrag: (isNodeEntry && entry.depth > 0) || isSeriesRow,
+        canRename: isNodeEntry && entry.level !== 'item' && Boolean(onRename),
+        canIndent: computeCanIndent(entry, outlineById, siblingMetaById),
+        canOutdent: computeCanOutdent(entry, outlineById),
+        canDelete: entry.depth > 0,
+        moveUpTargetId: entry.depth > 0 ? siblingMeta.prevId : null,
+        moveDownTargetId: entry.depth > 0 ? siblingMeta.nextId : null,
+        addChildOptions,
+      };
+    });
+  }, [onRename, outline, outlineById, presenceByNodeId, siblingMetaById]);
 
   return (
-    <div className="finding-hierarchy" aria-label="Guided processing hierarchy">
-      <div className="finding-hierarchy__levels">
-        {(['series', 'subseries', 'file', 'item'] as const).map((level) => (
-          <span key={level} className="finding-hierarchy__level-chip">
-            <span className="finding-hierarchy__level-dot" style={{ backgroundColor: LEVEL_COLORS[level] }} />
-            {LEVEL_LABELS[level]}
-          </span>
-        ))}
-      </div>
-
-      <div className="finding-hierarchy__outline">
-        <div className="finding-hierarchy__outline-header">
-          <div className="finding-hierarchy__outline-title">Hierarchy</div>
-          <div className="finding-hierarchy__outline-sub">Drag rows to reorder siblings</div>
-        </div>
-
-        <div className="finding-hierarchy__outline-list" role="tree">
-          {outline.map((entry) => {
-            const isSeriesRef = entry.kind === 'seriesRef';
-            const isNodeEntry = entry.kind === 'node';
-            const isSeriesRow = entry.level === 'series' && entry.depth === 0;
-            const canDragRow = (isNodeEntry && entry.depth > 0) || isSeriesRow;
-            const isSelected = entry.isFocused || Boolean(entry.isActiveSeries && entry.depth === 0);
-            const isDropTarget = dropTarget?.id === entry.id;
-            const isDragging = draggedId === entry.id;
-            const dropBefore = isDropTarget && dropTarget?.placement === 'before';
-            const dropAfter = isDropTarget && dropTarget?.placement === 'after';
-            const presence = isNodeEntry ? presenceByNodeId[entry.id] ?? [] : [];
-            const isRenameable = isNodeEntry && entry.level !== 'item' && typeof onRename === 'function';
-            const siblingMeta = siblingMetaById.get(entry.id) ?? { prevId: null, nextId: null };
-            const canIndent = computeCanIndent(entry, outlineById, siblingMetaById);
-            const canOutdent = computeCanOutdent(entry, outlineById);
-            const addChildOptions = getAddChildLevelOptions(entry.level);
-            const showJumpToDocument = isNodeEntry && entry.isFocused && typeof onJumpToDocument === 'function';
-
-            return (
-              <div key={entry.id} className="finding-hierarchy__entry-wrap">
-                {dropBefore ? <div className="finding-hierarchy__drop-line" aria-hidden /> : null}
-
-                <div
-                  className={`finding-hierarchy__outline-item ${isSelected ? 'is-selected' : ''} ${entry.isActiveSeries ? 'is-series-active' : ''} ${isDropTarget ? 'finding-hierarchy__drop-target' : ''} ${isDragging ? 'is-dragging' : ''}`}
-                  style={{ marginLeft: entry.depth * 12 }}
-                  data-hierarchy-row-id={entry.id}
-                  role="treeitem"
-                  aria-expanded={entry.hasChildren ? entry.expanded : undefined}
-                  onPointerDown={(event) => {
-                    const target = event.target as HTMLElement | null;
-                    if (target?.closest('input, textarea, select, button, a')) {
-                      return;
-                    }
-                    if (isSeriesRef) {
-                      if (entry.seriesDocName) {
-                        onSelectSeries?.(entry.seriesDocName);
-                      }
-                      setAddMenuOpenId(null);
-                      setActionMenuOpenId(null);
-                      return;
-                    }
-
-                    onFocus(entry.id);
-                    setAddMenuOpenId(null);
-                    setActionMenuOpenId(null);
-                    beginPointerDrag(event, entry.id, entry.depth, false);
-                  }}
-                >
-                  <button
-                    type="button"
-                    className={
-                      entry.hasChildren
-                        ? 'finding-hierarchy__expand'
-                        : 'finding-hierarchy__expand finding-hierarchy__expand--hidden'
-                    }
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (!entry.hasChildren) {
-                        return;
-                      }
-
-                      if (isSeriesRef) {
-                        if (entry.seriesDocName) {
-                          onSelectSeries?.(entry.seriesDocName);
-                        }
-                        return;
-                      }
-
-                      onToggleExpand(entry.id);
-                    }}
-                    aria-label={entry.expanded ? 'Collapse node' : 'Expand node'}
-                  >
-                    <svg
-                      width="11"
-                      height="11"
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      style={{ transform: entry.expanded ? 'rotate(90deg)' : 'rotate(0deg)' }}
-                      aria-hidden
-                    >
-                      <path d="M8 5l8 7-8 7V5z" />
-                    </svg>
-                  </button>
-
-                  <div
-                    className={
-                      !canDragRow
-                        ? 'finding-hierarchy__drag finding-hierarchy__drag--disabled'
-                        : 'finding-hierarchy__drag'
-                    }
-                    onPointerDown={(event) => {
-                      if (!canDragRow) {
-                        return;
-                      }
-                      event.stopPropagation();
-                      if (!isSeriesRef) {
-                        onFocus(entry.id);
-                      }
-                      setAddMenuOpenId(null);
-                      setActionMenuOpenId(null);
-                      beginPointerDrag(event, entry.id, entry.depth, isSeriesRow);
-                    }}
-                    aria-label="Drag to reorder sibling"
-                    title="Drag to reorder sibling"
-                  >
-                    <span className="finding-hierarchy__grip" />
-                  </div>
-
-                  <div className="finding-hierarchy__pill" style={{ '--level-color': LEVEL_COLORS[entry.level] } as CSSProperties}>
-                    <div className="finding-hierarchy__pill-main">
-                      <div className="finding-hierarchy__pill-left">
-                        <span className="finding-hierarchy__pill-level-name">{LEVEL_LABELS[entry.level]}</span>
-                        {entry.pathLabel.length > 0 ? (
-                          <span className="finding-hierarchy__pill-number">{entry.pathLabel}</span>
-                        ) : null}
-                      </div>
-                      <div className="finding-hierarchy__pill-divider" />
-
-                      {isRenameable ? (
-                        <input
-                          value={entry.title}
-                          onFocus={() => onFocus(entry.id)}
-                          onClick={(event) => event.stopPropagation()}
-                          onChange={(event) => onRename(entry.id, event.target.value)}
-                        />
-                      ) : (
-                        <span className="finding-hierarchy__pill-name" title={entry.title}>
-                          {entry.title}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="finding-hierarchy__pill-actions">
-                      {entry.seriesPresenceCount != null ? (
-                        <span className="finding-hierarchy__series-count">
-                          {entry.seriesPresenceCount} active {entry.seriesPresenceCount === 1 ? 'user' : 'users'}
-                        </span>
-                      ) : null}
-                      {presence.length > 0 ? (
-                        <span className="finding-hierarchy__presence" aria-label={`${presence.length} collaborators focused here`}>
-                          {presence.map((person) => (
-                            <span
-                              key={person.id}
-                              className={
-                                person.avatar
-                                  ? 'finding-hierarchy__presence-chip finding-hierarchy__presence-chip--avatar'
-                                  : 'finding-hierarchy__presence-chip'
-                              }
-                              style={{ backgroundColor: person.color }}
-                              title={`${person.name} focused`}
-                            >
-                              {person.avatar ? (
-                                <img
-                                  src={person.avatar}
-                                  alt={`${person.name} avatar`}
-                                  className="finding-hierarchy__presence-avatar"
-                                />
-                              ) : (
-                                userInitials(person.name)
-                              )}
-                            </span>
-                          ))}
-                        </span>
-                      ) : null}
-                      {showJumpToDocument ? (
-                        <button
-                          type="button"
-                          className="finding-hierarchy__view-trigger"
-                          onMouseDown={(event) => event.stopPropagation()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onFocus(entry.id);
-                            onJumpToDocument?.(entry.id);
-                            setAddMenuOpenId(null);
-                            setActionMenuOpenId(null);
-                          }}
-                          aria-label="Go to this level in finding aid"
-                          title="Go to section in finding aid"
-                        >
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <circle
-                              cx="12"
-                              cy="12"
-                              r="6.3"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="1.75"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                            <circle cx="12" cy="12" r="2.1" fill="none" stroke="currentColor" strokeWidth="1.75" />
-                            <path d="M12 3.5V6M12 18V20.5M3.5 12H6M18 12H20.5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-                          </svg>
-                        </button>
-                      ) : null}
-                      {isNodeEntry ? (
-                        <button
-                          type="button"
-                          className="finding-hierarchy__menu-trigger"
-                          onMouseDown={(event) => event.stopPropagation()}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onFocus(entry.id);
-                            setAddMenuOpenId(null);
-                            setActionMenuOpenId((current) => (current === entry.id ? null : entry.id));
-                          }}
-                          aria-label="Open row actions"
-                          aria-expanded={actionMenuOpenId === entry.id}
-                        >
-                          <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <circle cx="6" cy="12" r="1.9" fill="currentColor" />
-                            <circle cx="12" cy="12" r="1.9" fill="currentColor" />
-                            <circle cx="18" cy="12" r="1.9" fill="currentColor" />
-                          </svg>
-                        </button>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  {isNodeEntry && actionMenuOpenId === entry.id ? (
-                    <div
-                      className="finding-hierarchy__row-popover"
-                      role="toolbar"
-                      aria-label="Row actions"
-                      onMouseDown={(event) => event.stopPropagation()}
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      {entry.depth > 0 ? (
-                        <>
-                          <button
-                            type="button"
-                            className="finding-hierarchy__action"
-                            disabled={!siblingMeta.prevId}
-                            onClick={() => {
-                              if (siblingMeta.prevId) {
-                                onMove(entry.id, siblingMeta.prevId, 'before');
-                                onFocus(entry.id);
-                                setAddMenuOpenId(null);
-                                setActionMenuOpenId(null);
-                              }
-                            }}
-                          >
-                            Move Up
-                          </button>
-                          <button
-                            type="button"
-                            className="finding-hierarchy__action"
-                            disabled={!siblingMeta.nextId}
-                            onClick={() => {
-                              if (siblingMeta.nextId) {
-                                onMove(entry.id, siblingMeta.nextId, 'after');
-                                onFocus(entry.id);
-                                setAddMenuOpenId(null);
-                                setActionMenuOpenId(null);
-                              }
-                            }}
-                          >
-                            Move Down
-                          </button>
-                          <button
-                            type="button"
-                            className="finding-hierarchy__action"
-                            disabled={!canOutdent}
-                            onClick={() => {
-                              onOutdent(entry.id);
-                              onFocus(entry.id);
-                              setAddMenuOpenId(null);
-                              setActionMenuOpenId(null);
-                            }}
-                          >
-                            Outdent
-                          </button>
-                          <button
-                            type="button"
-                            className="finding-hierarchy__action"
-                            disabled={!canIndent}
-                            onClick={() => {
-                              onIndent(entry.id);
-                              onFocus(entry.id);
-                              setAddMenuOpenId(null);
-                              setActionMenuOpenId(null);
-                            }}
-                          >
-                            Indent
-                          </button>
-                        </>
-                      ) : null}
-                      <div className="finding-hierarchy__add-wrap">
-                        <button
-                          type="button"
-                          className="finding-hierarchy__action finding-hierarchy__add-btn"
-                          title="Add child level"
-                          aria-label="Add child level"
-                          aria-expanded={addMenuOpenId === entry.id}
-                          disabled={addChildOptions.length === 0}
-                          onClick={() => {
-                            if (addChildOptions.length === 0) {
-                              return;
-                            }
-                            setAddMenuOpenId((current) => (current === entry.id ? null : entry.id));
-                          }}
-                        >
-                          +
-                        </button>
-
-                        {addMenuOpenId === entry.id ? (
-                          <div className="finding-hierarchy__add-menu" role="menu">
-                            {addChildOptions.map((level) => (
-                              <button
-                                key={`${entry.id}-${level}`}
-                                type="button"
-                                role="menuitem"
-                                className="finding-hierarchy__add-menu-item"
-                                onClick={() => {
-                                  onAddChild(entry.id, level);
-                                  setAddMenuOpenId(null);
-                                  setActionMenuOpenId(null);
-                                }}
-                              >
-                                Add {LEVEL_LABELS[level]}
-                              </button>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-
-                      <button
-                        type="button"
-                        className="finding-hierarchy__action finding-hierarchy__delete-btn"
-                        disabled={entry.depth === 0}
-                          onClick={() => {
-                            if (entry.depth === 0) {
-                              return;
-                            }
-                            onDelete(entry.id);
-                            setAddMenuOpenId(null);
-                            setActionMenuOpenId(null);
-                          }}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-
-                {dropAfter ? <div className="finding-hierarchy__drop-line" aria-hidden /> : null}
-              </div>
-            );
-          })}
-
-          <div
-            className={`finding-hierarchy__outline-drop-end ${dropEnd ? 'is-drop-target' : ''}`}
-            aria-hidden
-          >
-            {dropEnd ? <div className="finding-hierarchy__drop-slot" aria-hidden /> : null}
-          </div>
-        </div>
-      </div>
-    </div>
+    <HierarchyTreeWidget
+      rows={rows}
+      onFocusNode={(id) => {
+        onFocus(id);
+        onJumpToDocument?.(id);
+      }}
+      onSelectSeries={onSelectSeries}
+      onToggleExpand={onToggleExpand}
+      onMove={handleMove}
+      canDrop={canDrop}
+      canDropToEnd={moveToEndTarget}
+      onRename={onRename}
+      onIndent={onIndent}
+      onOutdent={onOutdent}
+      onAddChild={(parentId, level) => {
+        if (!isHierarchyLevel(level)) {
+          return;
+        }
+        onAddChild(parentId, level);
+      }}
+      onDelete={onDelete}
+      getUserInitials={userInitials}
+    />
   );
+}
+
+function isSeriesRowEntry(entry: OutlineEntry): boolean {
+  return entry.level === 'series' && entry.depth === 0 && Boolean(entry.seriesDocName);
+}
+
+function isHierarchyLevel(value: string): value is HierarchyLevel {
+  return value === 'series' || value === 'subseries' || value === 'file' || value === 'item';
 }
 
 function flattenVisibleHierarchy(
@@ -874,7 +418,6 @@ function flattenVisibleHierarchy(
     path: number[],
   ) => {
     const expanded = isExpandedByPolicy(node.id, focusState, focusedAncestors);
-    const ordinal = depth === 0 ? 1 : path[path.length - 1] ?? 1;
     entries.push({
       id: node.id,
       parentId,
@@ -884,7 +427,7 @@ function flattenVisibleHierarchy(
       hasChildren: node.children.length > 0,
       expanded,
       isFocused: focusState.focusedId === node.id,
-      pathLabel: toRomanNumeral(ordinal),
+      pathLabel: path.join('.'),
       kind: 'node',
       isActiveSeries: depth === 0,
     });
