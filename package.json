@@ -12,7 +12,9 @@
     "test": "npm run --workspaces --if-present test",
     "lint": "npm run --workspaces --if-present lint",
     "typecheck": "npm run --workspaces --if-present typecheck",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "seed:reset": "node scripts/reset-seed-data.mjs",
+    "seed:rebuild": "node scripts/reset-seed-data.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
