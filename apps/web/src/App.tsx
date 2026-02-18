@@ -2741,20 +2741,9 @@ export function App({ currentUser, token, onLogout }: AppProps) {
     <div className="app-shell">
       <header className="workspace-header">
         <div className="workspace-header__brand">
-          <div className="workspace-header__logo-stack">
-            <img src={historiqLogo} alt="Historiq" className="workspace-header__logo" />
-            <p className="workspace-header__kicker">Una Collaborative Editor</p>
-          </div>
-
-          <div className="workspace-header__meta">
-            <div className="workspace-header__title-row">
-              <div className="workspace-header__title-wrap">
-                <h1 className="workspace-header__title-display" title={activeCollectionTitle}>
-                  {activeCollectionTitle}
-                </h1>
-              </div>
-            </div>
-            <p className="workspace-header__sub">{activeCollectionDescriptionText}</p>
+          <img src={historiqLogo} alt="Historiq" className="workspace-header__logo" />
+          <div className="workspace-header__brand-copy">
+            <h2 className="workspace-header__product">Una Collaborative Editor</h2>
           </div>
         </div>
 
@@ -2804,6 +2793,13 @@ export function App({ currentUser, token, onLogout }: AppProps) {
           </div>
         </div>
       </header>
+
+      <section className="workspace-main__collection-header" aria-label="Active collection">
+        <h1 className="workspace-main__collection-title" title={activeCollectionTitle}>
+          {activeCollectionTitle}
+        </h1>
+        <p className="workspace-main__collection-description">{activeCollectionDescriptionText}</p>
+      </section>
 
       <div className={catalogSidebarVisible ? 'workspace-grid workspace-grid--catalog-open' : 'workspace-grid'}>
         <aside className="workspace-rail">
