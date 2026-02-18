@@ -289,6 +289,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   const collabClientRef = useRef<CollabClient | null>(null);
   const collabInstanceIdRef = useRef<string>(`desktop-${createSafeId()}`);
   const lastFocusedSeriesDocRef = useRef<string | null>(null);
+  const previousActiveSeriesDocNameRef = useRef(workspace.activeSeriesDocName);
   const presenceSyncRafRef = useRef<number | null>(null);
   const manifestSeriesRecoveryAttemptedRef = useRef<Set<string>>(new Set());
   const localUser = useMemo(
@@ -751,7 +752,9 @@ export function App({ currentUser, token, onLogout }: AppProps) {
   }, [activeSeriesDoc]);
 
   useEffect(() => {
+    const previousDocName = previousActiveSeriesDocNameRef.current;
     if (!activeHierarchy) {
+      previousActiveSeriesDocNameRef.current = workspace.activeSeriesDocName;
       return;
     }
 
@@ -760,19 +763,39 @@ export function App({ currentUser, token, onLogout }: AppProps) {
         return previous;
       }
 
+      const seeded = createFocusStateForHierarchy(activeHierarchy);
+      const carriedMode = previous[previousDocName]?.mode ?? seeded.mode;
+
       return {
         ...previous,
-        [workspace.activeSeriesDocName]: createFocusStateForHierarchy(activeHierarchy),
+        [workspace.activeSeriesDocName]: {
+          ...seeded,
+          mode: carriedMode,
+        },
       };
     });
+
+    previousActiveSeriesDocNameRef.current = workspace.activeSeriesDocName;
   }, [activeHierarchy, workspace.activeSeriesDocName]);
 
-  const currentFocusState =
-    activeHierarchy && focusStateByDoc[workspace.activeSeriesDocName]
-      ? focusStateByDoc[workspace.activeSeriesDocName]
-      : activeHierarchy
-        ? createFocusStateForHierarchy(activeHierarchy)
-        : null;
+  const currentFocusState = useMemo(() => {
+    if (!activeHierarchy) {
+      return null;
+    }
+
+    const existing = focusStateByDoc[workspace.activeSeriesDocName];
+    if (existing) {
+      return existing;
+    }
+
+    const seeded = createFocusStateForHierarchy(activeHierarchy);
+    const carriedMode = focusStateByDoc[previousActiveSeriesDocNameRef.current]?.mode ?? seeded.mode;
+
+    return {
+      ...seeded,
+      mode: carriedMode,
+    };
+  }, [activeHierarchy, focusStateByDoc, workspace.activeSeriesDocName]);
 
   const updateCurrentFocusState = useCallback(
     (updater: (state: FocusState) => FocusState) => {
@@ -1749,9 +1772,30 @@ export function App({ currentUser, token, onLogout }: AppProps) {
 
   const openSeriesInHierarchy = useCallback(
     (docName: string) => {
+      const currentMode = currentFocusState?.mode;
       setActiveSeriesDocName(docName);
+
+      if (!currentMode) {
+        return;
+      }
+
+      setFocusStateByDoc((previous) => {
+        const target = previous[docName];
+        if (!target || target.mode === currentMode) {
+          return previous;
+        }
+
+        return {
+          ...previous,
+          [docName]: {
+            ...target,
+            mode: currentMode,
+            expandedIds: new Set(target.expandedIds),
+          },
+        };
+      });
     },
-    [setActiveSeriesDocName],
+    [currentFocusState?.mode, setActiveSeriesDocName],
   );
 
   const focusHierarchyNode = useCallback(
@@ -3129,6 +3173,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                   data-mode="document"
                   role="tab"
                   aria-selected={primaryViewMode === 'document'}
+                  title="A descriptive guide that helps locate and understand archival materials"
                   className={
                     primaryViewMode === 'document' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
                   }
@@ -3149,6 +3194,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                   data-mode="focus"
                   role="tab"
                   aria-selected={primaryViewMode === 'focus'}
+                  title="Collections Management Catalog Entry"
                   className={
                     primaryViewMode === 'focus' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'
                   }
@@ -3169,6 +3215,7 @@ export function App({ currentUser, token, onLogout }: AppProps) {
                   data-mode="split"
                   role="tab"
                   aria-selected={primaryViewMode === 'split'}
+                  title="Side-by-side Finding Aid and Catalog Entry"
                   className={primaryViewMode === 'split' ? 'mode-toggle__btn mode-toggle__btn--active' : 'mode-toggle__btn'}
                   onClick={() => {
                     setCatalogSidebarOpen(true);
@@ -3303,7 +3350,6 @@ export function App({ currentUser, token, onLogout }: AppProps) {
             </section>
           ) : visibleMode === 'focus' ? (
             <section className="panel focus-panel cms-panel" aria-label="Catalog view">
-              <p className="cms-panel__hint">Plain forms generated from the focused hierarchy node.</p>
               {catalogFormContent}
             </section>
           ) : (

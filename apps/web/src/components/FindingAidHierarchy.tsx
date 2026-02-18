@@ -374,7 +374,9 @@ export function FindingAidHierarchy({
       rows={rows}
       onFocusNode={(id) => {
         onFocus(id);
-        onJumpToDocument?.(id);
+        if (focusState.mode === 'document') {
+          onJumpToDocument?.(id);
+        }
       }}
       onSelectSeries={onSelectSeries}
       onToggleExpand={onToggleExpand}

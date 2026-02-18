@@ -5,6 +5,8 @@ import { App } from './App';
 import { LoginScreen } from './components/LoginScreen';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import '../../../packages/hierarchy-widget/src/styles.css';
+import '../@/styles/_variables.scss';
+import '../@/styles/_keyframe-animations.scss';
 import './styles.css';
 
 function Root() {

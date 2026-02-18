@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { type AnyExtension, JSONContent, Mark, Node, mergeAttributes } from '@tiptap/core';
 import Collaboration from '@tiptap/extension-collaboration';
@@ -6,10 +6,19 @@ import CollaborationCaret from '@tiptap/extension-collaboration-caret';
 import Heading from '@tiptap/extension-heading';
 import Link from '@tiptap/extension-link';
 import Underline from '@tiptap/extension-underline';
-import { EditorContent, useEditor } from '@tiptap/react';
+import { EditorContent, EditorContext, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import type { HocuspocusProvider } from '@hocuspocus/provider';
 import { PAGE_SIZES, PaginationPlus } from 'tiptap-pagination-plus';
+import { Toolbar, ToolbarGroup, ToolbarSeparator } from '@/components/tiptap-ui-primitive/toolbar';
+import { Button } from '@/components/tiptap-ui-primitive/button';
+import { UndoRedoButton } from '@/components/tiptap-ui/undo-redo-button';
+import { HeadingDropdownMenu } from '@/components/tiptap-ui/heading-dropdown-menu';
+import { ListDropdownMenu } from '@/components/tiptap-ui/list-dropdown-menu';
+import { BlockquoteButton } from '@/components/tiptap-ui/blockquote-button';
+import { CodeBlockButton } from '@/components/tiptap-ui/code-block-button';
+import { MarkButton } from '@/components/tiptap-ui/mark-button';
+import { LinkPopover } from '@/components/tiptap-ui/link-popover';
 
 import type { PMNode } from '../../../../src/contracts/types';
 import { formatHierarchyNodeHeading, getHierarchyLevelLabel } from '../lib/hierarchyLabels';
@@ -542,32 +551,6 @@ function readHierarchyIdAtSelection(editor: ReturnType<typeof useEditor>): strin
   return firstHierarchyId;
 }
 
-function EditorActionButton({
-  children,
-  active,
-  onClick,
-  disabled,
-  ariaLabel,
-}: {
-  children: ReactNode;
-  active?: boolean;
-  onClick: () => void;
-  disabled?: boolean;
-  ariaLabel: string;
-}) {
-  return (
-    <button
-      type="button"
-      className={active ? 'finding-aid__action is-active' : 'finding-aid__action'}
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={ariaLabel}
-    >
-      {children}
-    </button>
-  );
-}
-
 export function FindingAidEditor({
   content,
   hierarchyHeadings,
@@ -919,25 +902,6 @@ export function FindingAidEditor({
     };
   }, [editor, focusedHierarchyId, focusRequestKey, hierarchySignature]);
 
-  const setLink = useCallback(() => {
-    if (!editor) {
-      return;
-    }
-
-    const existing = String(editor.getAttributes('link').href ?? '');
-    const next = window.prompt('Enter a URL', existing);
-    if (next == null) {
-      return;
-    }
-
-    if (next.trim().length === 0) {
-      editor.chain().focus().extendMarkRange('link').unsetLink().run();
-      return;
-    }
-
-    editor.chain().focus().extendMarkRange('link').setLink({ href: next.trim() }).run();
-  }, [editor]);
-
   const insertSectionAtDepth = useCallback(
     (depth: number) => {
       if (!editor) {
@@ -964,17 +928,11 @@ export function FindingAidEditor({
 
   return (
     <div className="finding-aid" aria-label="Finding aid editor">
-      <div className="finding-aid__toolbar">
-        <div className="finding-aid__toolbar-left">
-          <span>Finding Aid</span>
-          <span className="finding-aid__toolbar-hint">
-            A descriptive guide that helps locate and understand archival materials
-          </span>
-        </div>
-
-        <div className="finding-aid__toolbar-actions">
-          <div className="finding-aid__section-controls">
+      <EditorContext.Provider value={{ editor }}>
+        <Toolbar className="finding-aid__template-toolbar" variant="fixed">
+          <ToolbarGroup>
             <select
+              className="finding-aid__simple-select"
               value={sectionDepth}
               onChange={(event) => setSectionDepth(Number(event.target.value))}
               aria-label="Section level"
@@ -983,169 +941,66 @@ export function FindingAidEditor({
               <option value={1}>Heading 2</option>
               <option value={2}>Heading 3</option>
             </select>
-            <EditorActionButton
-              ariaLabel="Add section"
+
+            <Button
+              type="button"
+              variant="ghost"
+              tooltip="Add section"
               onClick={() => insertSectionAtDepth(sectionDepth)}
               disabled={!editor}
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
+              <svg className="tiptap-button-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
               </svg>
-            </EditorActionButton>
+            </Button>
+
+            <Button
+              type="button"
+              variant="ghost"
+              tooltip="Delete section"
+              onClick={deleteCurrentSection}
+              disabled={!editor}
+            >
+              <svg className="tiptap-button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M6 6l12 12M18 6l-12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </Button>
+          </ToolbarGroup>
+
+          <ToolbarSeparator />
+
+          <ToolbarGroup>
+            <UndoRedoButton editor={editor} action="undo" />
+            <UndoRedoButton editor={editor} action="redo" />
+          </ToolbarGroup>
+
+          <ToolbarSeparator />
+
+          <ToolbarGroup>
+            <HeadingDropdownMenu editor={editor} levels={[1, 2, 3]} />
+            <ListDropdownMenu editor={editor} types={['bulletList', 'orderedList']} />
+            <BlockquoteButton editor={editor} />
+            <CodeBlockButton editor={editor} />
+          </ToolbarGroup>
+
+          <ToolbarSeparator />
+
+          <ToolbarGroup>
+            <MarkButton editor={editor} type="bold" />
+            <MarkButton editor={editor} type="italic" />
+            <MarkButton editor={editor} type="strike" />
+            <MarkButton editor={editor} type="code" />
+            <MarkButton editor={editor} type="underline" />
+            <LinkPopover editor={editor} />
+          </ToolbarGroup>
+        </Toolbar>
+
+        <div className="finding-aid__editor-shell">
+          <div className="finding-aid__editor-page finding-aid__editor-page--paginated">
+            {editor ? <EditorContent editor={editor} /> : <div className="finding-aid__loading">Loading editor...</div>}
           </div>
-
-          <EditorActionButton ariaLabel="Delete section" onClick={deleteCurrentSection} disabled={!editor}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M6 6l12 12M18 6l-12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton ariaLabel="Undo" onClick={() => editor?.chain().focus().undo().run()} disabled={!editor}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M9 7H5v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              <path d="M5 11c2.5-4 10-5 14 1" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton ariaLabel="Redo" onClick={() => editor?.chain().focus().redo().run()} disabled={!editor}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M15 7h4v4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              <path d="M19 11c-2.5-4-10-5-14 1" stroke="currentColor" strokeWidth="2" strokeLinecap="round" fill="none" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Bold"
-            active={Boolean(editor?.isActive('bold'))}
-            onClick={() => editor?.chain().focus().toggleBold().run()}
-            disabled={!editor}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 5h6a3 3 0 0 1 0 6H7zM7 11h7a3 3 0 0 1 0 6H7z" stroke="currentColor" strokeWidth="2" fill="none" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Italic"
-            active={Boolean(editor?.isActive('italic'))}
-            onClick={() => editor?.chain().focus().toggleItalic().run()}
-            disabled={!editor}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M10 5h8M6 19h8M14 5l-4 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Underline"
-            active={Boolean(editor?.isActive('underline'))}
-            onClick={() => editor?.chain().focus().toggleUnderline().run()}
-            disabled={!editor}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 5v6a5 5 0 0 0 10 0V5M5 19h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Strikethrough"
-            active={Boolean(editor?.isActive('strike'))}
-            onClick={() => editor?.chain().focus().toggleStrike().run()}
-            disabled={!editor}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 12h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              <path d="M8 5h8a3 3 0 0 1 0 6H8a3 3 0 0 0 0 6h8" stroke="currentColor" strokeWidth="2" fill="none" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton ariaLabel="Link" onClick={setLink} disabled={!editor}>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M10 13a5 5 0 0 1 0-7l2-2a5 5 0 0 1 7 7l-1 1" stroke="currentColor" strokeWidth="2" fill="none" />
-              <path d="M14 11a5 5 0 0 1 0 7l-2 2a5 5 0 0 1-7-7l1-1" stroke="currentColor" strokeWidth="2" fill="none" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Bulleted list"
-            active={Boolean(editor?.isActive('bulletList'))}
-            onClick={() => editor?.chain().focus().toggleBulletList().run()}
-            disabled={!editor}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M9 6h10M9 12h10M9 18h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              <circle cx="5" cy="6" r="1.5" fill="currentColor" />
-              <circle cx="5" cy="12" r="1.5" fill="currentColor" />
-              <circle cx="5" cy="18" r="1.5" fill="currentColor" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Numbered list"
-            active={Boolean(editor?.isActive('orderedList'))}
-            onClick={() => editor?.chain().focus().toggleOrderedList().run()}
-            disabled={!editor}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M9 6h10M9 12h10M9 18h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-              <path d="M4 7h2M4 13h2M4 19h2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Quote"
-            active={Boolean(editor?.isActive('blockquote'))}
-            onClick={() => editor?.chain().focus().toggleBlockquote().run()}
-            disabled={!editor}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 7h4v6H7zM13 7h4v6h-4z" stroke="currentColor" strokeWidth="2" fill="none" />
-            </svg>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Heading 1"
-            active={Boolean(editor?.isActive('heading', { level: 1 }))}
-            onClick={() => editor?.chain().focus().toggleHeading({ level: 1 }).run()}
-            disabled={!editor}
-          >
-            <span className="finding-aid__tool-text">H1</span>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Heading 2"
-            active={Boolean(editor?.isActive('heading', { level: 2 }))}
-            onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}
-            disabled={!editor}
-          >
-            <span className="finding-aid__tool-text">H2</span>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Heading 3"
-            active={Boolean(editor?.isActive('heading', { level: 3 }))}
-            onClick={() => editor?.chain().focus().toggleHeading({ level: 3 }).run()}
-            disabled={!editor}
-          >
-            <span className="finding-aid__tool-text">H3</span>
-          </EditorActionButton>
-
-          <EditorActionButton
-            ariaLabel="Paragraph"
-            active={Boolean(editor?.isActive('paragraph'))}
-            onClick={() => editor?.chain().focus().setParagraph().run()}
-            disabled={!editor}
-          >
-            <span className="finding-aid__tool-text">P</span>
-          </EditorActionButton>
         </div>
-      </div>
-
-      <div className="finding-aid__editor-shell">
-        <div className="finding-aid__editor-page finding-aid__editor-page--paginated">
-          {editor ? <EditorContent editor={editor} /> : <div className="finding-aid__loading">Loading editor...</div>}
-        </div>
-      </div>
+      </EditorContext.Provider>
     </div>
   );
 }
